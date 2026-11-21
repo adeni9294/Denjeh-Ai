@@ -46,6 +46,10 @@ function extractJsonObject(rawText: string): Record<string, unknown> {
   return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1)) as Record<string, unknown>;
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function callGeminiEndpoint(params: {
   apiKey: string;
   baseUrl: string;
@@ -57,42 +61,54 @@ async function callGeminiEndpoint(params: {
     params.apiKey
   )}`;
 
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      systemInstruction: {
-        parts: [{ text: params.systemPrompt }],
-      },
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: params.userPrompt }],
-        },
-      ],
-      generationConfig: {
-        temperature: 0.3,
-        responseMimeType: "application/json",
-      },
-    }),
-  });
+  let lastErr: Error | null = null;
 
-  if (!res.ok) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: {
+          parts: [{ text: params.systemPrompt }],
+        },
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: params.userPrompt }],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.3,
+          responseMimeType: "application/json",
+        },
+      }),
+    });
+
+    if (res.ok) {
+      const data = (await res.json()) as {
+        candidates?: { content?: { parts?: { text?: string }[] } }[];
+        usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+      };
+
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+      return {
+        text,
+        inputTokens: data.usageMetadata?.promptTokenCount ?? 0,
+        outputTokens: data.usageMetadata?.candidatesTokenCount ?? 0,
+      };
+    }
+
     const errBody = await res.text();
-    throw new Error(`Gemini HTTP ${res.status}: ${errBody.slice(0, 180)}`);
+    lastErr = new Error(`Gemini HTTP ${res.status}: ${errBody.slice(0, 180)}`);
+
+    if (res.status === 503 && attempt === 0) {
+      await sleep(900);
+      continue;
+    }
+    break;
   }
 
-  const data = (await res.json()) as {
-    candidates?: { content?: { parts?: { text?: string }[] } }[];
-    usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
-  };
-
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-  return {
-    text,
-    inputTokens: data.usageMetadata?.promptTokenCount ?? 0,
-    outputTokens: data.usageMetadata?.candidatesTokenCount ?? 0,
-  };
+  throw lastErr ?? new Error("Gagal memanggil endpoint Gemini.");
 }
 
 async function callOpenAiCompatibleEndpoint(params: {
@@ -161,76 +177,87 @@ export async function generatePlanWithFallback(params: {
     const apiKey = decodeStoredKey(provider.encrypted_api_key);
     if (!apiKey) continue;
 
-    const providerModels = params.models.filter(
-      (m) => m.provider_id === provider.id && m.is_active
-    );
-    const chosenModel =
-      providerModels.find((m) => m.is_default)?.model_identifier ??
-      providerModels[0]?.model_identifier ??
-      (provider.provider_key === "groq" ? "llama-3.3-70b-versatile" : "gemini-2.5-flash");
+    const providerModels = params.models
+      .filter((m) => m.provider_id === provider.id && m.is_active)
+      .sort((a, b) => Number(b.is_default) - Number(a.is_default));
 
-    try {
-      const isGemini =
-        provider.provider_key === "gemini" ||
-        (provider.base_url ?? "").includes("generativelanguage.googleapis.com");
+    const candidateModels =
+      providerModels.length > 0
+        ? Array.from(new Set(providerModels.map((m) => m.model_identifier)))
+        : [
+            provider.provider_key === "groq"
+              ? "llama-3.3-70b-versatile"
+              : "gemini-3.8-flash-lite",
+          ];
 
-      const baseUrl =
-        provider.base_url ||
-        (isGemini
-          ? "https://generativelanguage.googleapis.com/v1beta"
-          : "https://api.groq.com/openai/v1");
+    const isGemini =
+      provider.provider_key === "gemini" ||
+      (provider.base_url ?? "").includes("generativelanguage.googleapis.com");
 
-      const rawResult = isGemini
-        ? await callGeminiEndpoint({
-            apiKey,
-            baseUrl,
-            model: chosenModel,
-            systemPrompt: params.systemPrompt,
-            userPrompt: params.userPrompt,
-          })
-        : await callOpenAiCompatibleEndpoint({
-            apiKey,
-            baseUrl,
-            model: chosenModel,
-            systemPrompt: params.systemPrompt,
-            userPrompt: params.userPrompt,
-          });
+    const baseUrl =
+      provider.base_url ||
+      (isGemini
+        ? "https://generativelanguage.googleapis.com/v1beta"
+        : "https://api.groq.com/openai/v1");
 
-      const parsed = extractJsonObject(rawResult.text);
-      const rawSteps = Array.isArray(parsed.steps) ? parsed.steps : [];
+    for (const chosenModel of candidateModels) {
+      try {
+        const rawResult = isGemini
+          ? await callGeminiEndpoint({
+              apiKey,
+              baseUrl,
+              model: chosenModel,
+              systemPrompt: params.systemPrompt,
+              userPrompt: params.userPrompt,
+            })
+          : await callOpenAiCompatibleEndpoint({
+              apiKey,
+              baseUrl,
+              model: chosenModel,
+              systemPrompt: params.systemPrompt,
+              userPrompt: params.userPrompt,
+            });
 
-      if (rawSteps.length === 0) {
-        throw new Error("AI mengembalikan rencana kosong (0 langkah).");
-      }
+        const parsed = extractJsonObject(rawResult.text);
+        const rawSteps = Array.isArray(parsed.steps) ? parsed.steps : [];
 
-      const normalizedSteps: GeneratedPlanStep[] = rawSteps.map((item, index) => {
-        const row = item as Record<string, unknown>;
+        if (rawSteps.length === 0) {
+          throw new Error("AI mengembalikan rencana kosong (0 langkah).");
+        }
+
+        const normalizedSteps: GeneratedPlanStep[] = rawSteps.map((item, index) => {
+          const row = item as Record<string, unknown>;
+          return {
+            stepNumber: Number(row.stepNumber ?? index + 1),
+            agentCode: String(row.agentCode ?? "story"),
+            agentName: String(row.agentName ?? "Story Agent"),
+            action: String(row.action ?? "Menyusun bagian konten sesuai instruksi."),
+            dependsOn: String(
+              row.dependsOn ?? (index === 0 ? "Project Memory" : `Step ${index}`)
+            ),
+            estimatedOutput: String(row.estimatedOutput ?? "Artefak Terstruktur"),
+          };
+        });
+
         return {
-          stepNumber: Number(row.stepNumber ?? index + 1),
-          agentCode: String(row.agentCode ?? "story"),
-          agentName: String(row.agentName ?? "Story Agent"),
-          action: String(row.action ?? "Menyusun bagian konten sesuai instruksi."),
-          dependsOn: String(row.dependsOn ?? (index === 0 ? "Project Memory" : `Step ${index}`)),
-          estimatedOutput: String(row.estimatedOutput ?? "Artefak Terstruktur"),
+          intentSummary: String(
+            parsed.intentSummary ?? "Rencana eksekusi multi-agen berhasil disusun."
+          ),
+          recommendedMode:
+            parsed.recommendedMode === "autonomous" ? "autonomous" : "manual",
+          steps: normalizedSteps,
+          providerUsed: provider.display_name,
+          modelUsed: chosenModel,
+          inputTokens: rawResult.inputTokens,
+          outputTokens: rawResult.outputTokens,
         };
-      });
-
-      return {
-        intentSummary: String(
-          parsed.intentSummary ?? "Rencana eksekusi multi-agen berhasil disusun."
-        ),
-        recommendedMode:
-          parsed.recommendedMode === "autonomous" ? "autonomous" : "manual",
-        steps: normalizedSteps,
-        providerUsed: provider.display_name,
-        modelUsed: chosenModel,
-        inputTokens: rawResult.inputTokens,
-        outputTokens: rawResult.outputTokens,
-      };
-    } catch (err) {
-      errors.push(
-        `${provider.display_name}: ${err instanceof Error ? err.message : "Error tidak diketahui"}`
-      );
+      } catch (err) {
+        errors.push(
+          `${provider.display_name} (${chosenModel}): ${
+            err instanceof Error ? err.message : "Error tidak diketahui"
+          }`
+        );
+      }
     }
   }
 
