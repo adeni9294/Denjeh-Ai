@@ -38,6 +38,12 @@ type WorkflowRunWithPlan = DbWorkflowRun & {
   plan_json?: Record<string, unknown> | null;
 };
 
+type TaskWithPayloads = DbTask & {
+  input_payload?: Record<string, unknown> | null;
+  output_payload?: Record<string, unknown> | null;
+  progress?: number | null;
+};
+
 function getPlanMeta(run: DbWorkflowRun): Record<string, unknown> {
   const raw = (run as WorkflowRunWithPlan).plan_json;
   return raw && typeof raw === "object" ? raw : {};
@@ -56,6 +62,7 @@ export function CommandWorkspace() {
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [approvingRun, setApprovingRun] = useState(false);
+  const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isLoggedIn, setIsLoggedIn] = useState<boolean | null>(null);
 
@@ -79,7 +86,6 @@ export function CommandWorkspace() {
         .select("*")
         .eq("user_id", user.id)
         .order("created_at", { ascending: false })
-        .order("step_order", { ascending: true })
         .limit(40);
 
       if (projectId) {
@@ -92,8 +98,20 @@ export function CommandWorkspace() {
         tasksQuery,
       ]);
 
+      const sortedTasks = ((tasksData as TaskWithPayloads[]) ?? []).sort(
+        (a, b) => {
+          const aOrder = Number(
+            (a.input_payload ?? {}).stepOrder ?? a.step_order ?? 0
+          );
+          const bOrder = Number(
+            (b.input_payload ?? {}).stepOrder ?? b.step_order ?? 0
+          );
+          return aOrder - bOrder;
+        }
+      );
+
       setHistoryRuns((runsData as DbWorkflowRun[]) ?? []);
-      setDbTasks((tasksData as DbTask[]) ?? []);
+      setDbTasks(sortedTasks);
     } catch {
       // Abaikan jika gagal memuat riwayat awal
     }
@@ -152,13 +170,28 @@ export function CommandWorkspace() {
     const { data } = await supabase
       .from("tasks")
       .select("*")
-      .eq("workflow_run_id", run.id)
-      .order("step_order", { ascending: true });
+      .eq("workflow_run_id", run.id);
 
-    const runTasks = (data as DbTask[]) ?? [];
+    const runTasks = ((data as TaskWithPayloads[]) ?? []).sort((a, b) => {
+      const aOrder = Number(
+        (a.input_payload ?? {}).stepOrder ?? a.step_order ?? 0
+      );
+      const bOrder = Number(
+        (b.input_payload ?? {}).stepOrder ?? b.step_order ?? 0
+      );
+      return aOrder - bOrder;
+    });
+
     const planMeta = getPlanMeta(run);
+    const firstPayload = (runTasks[0]?.input_payload ?? {}) as Record<
+      string,
+      unknown
+    >;
     const runTitle = String(
-      planMeta.title || runTasks[0]?.instruction || `Workflow Run #${run.id.slice(0, 8)}`
+      planMeta.title ||
+        firstPayload.instruction ||
+        runTasks[0]?.title ||
+        `Workflow Run #${run.id.slice(0, 8)}`
     );
 
     const timeLabel = new Date(run.created_at).toLocaleTimeString("id-ID", {
@@ -170,11 +203,6 @@ export function CommandWorkspace() {
       run.status === "running" ||
       run.status === "completed" ||
       runTasks.some((t) => t.status === "running" || t.status === "completed");
-
-    const firstPayload = (runTasks[0]?.input_payload ?? {}) as Record<
-      string,
-      unknown
-    >;
 
     const restoredMessages: CommandMessage[] = [
       {
@@ -196,14 +224,16 @@ export function CommandWorkspace() {
             firstPayload.intentSummary ||
             `Riwayat rencana eksekusi (${runTasks.length} langkah) dipulihkan dari database.`
         ),
-        plan: runTasks.map((t) => {
+        plan: runTasks.map((t, idx) => {
           const payload = (t.input_payload ?? {}) as Record<string, unknown>;
           return {
-            stepNumber: t.step_order,
-            agentName: String(payload.agentName || t.agent_code),
-            action: t.instruction,
+            stepNumber: Number(payload.stepOrder ?? t.step_order ?? idx + 1),
+            agentName: String(payload.agentName || payload.agentCode || t.title),
+            action: String(payload.instruction || t.title),
             dependsOn: String(payload.dependsOn || "-"),
-            estimatedOutput: String(payload.estimatedOutput || "Artefak Terstruktur"),
+            estimatedOutput: String(
+              payload.estimatedOutput || "Artefak Terstruktur"
+            ),
           };
         }),
       },
@@ -228,23 +258,32 @@ export function CommandWorkspace() {
 
         const { data: runTasks } = await supabase
           .from("tasks")
-          .select("id, step_order")
-          .eq("workflow_run_id", activeRunId)
-          .order("step_order", { ascending: true });
+          .select("id, status, input_payload")
+          .eq("workflow_run_id", activeRunId);
 
-        if (runTasks && runTasks.length > 0) {
+        const sorted = ((runTasks as TaskWithPayloads[]) ?? []).sort((a, b) => {
+          const aOrder = Number(
+            (a.input_payload ?? {}).stepOrder ?? a.step_order ?? 0
+          );
+          const bOrder = Number(
+            (b.input_payload ?? {}).stepOrder ?? b.step_order ?? 0
+          );
+          return aOrder - bOrder;
+        });
+
+        if (sorted.length > 0) {
           await supabase
             .from("tasks")
             .update({ status: "running", started_at: new Date().toISOString() })
-            .eq("id", runTasks[0].id);
+            .eq("id", sorted[0].id);
 
-          if (runTasks.length > 1) {
+          if (sorted.length > 1) {
             await supabase
               .from("tasks")
               .update({ status: "pending" })
               .in(
                 "id",
-                runTasks.slice(1).map((t) => t.id)
+                sorted.slice(1).map((t) => t.id)
               );
           }
         }
@@ -286,6 +325,32 @@ export function CommandWorkspace() {
       );
     } finally {
       setApprovingRun(false);
+    }
+  };
+
+  const handleRunTask = async (taskId: string) => {
+    if (runningTaskId) return;
+    setRunningTaskId(taskId);
+    setErrorMsg(null);
+
+    try {
+      const res = await fetch(`/api/orchestrator/tasks/${taskId}/run`, {
+        method: "POST",
+      });
+      const data = (await res.json()) as { ok?: boolean; error?: string };
+      if (!res.ok) {
+        setErrorMsg(data.error ?? "Gagal mengeksekusi agen.");
+        return;
+      }
+      await loadHistoryAndTasks(selectedProject);
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : "Koneksi gagal saat menjalankan agen."
+      );
+    } finally {
+      setRunningTaskId(null);
     }
   };
 
@@ -377,7 +442,9 @@ export function CommandWorkspace() {
       };
 
       if (!res.ok || !data.planResult) {
-        setErrorMsg(data.error ?? "Gagal memproses instruksi di Master Orchestrator.");
+        setErrorMsg(
+          data.error ?? "Gagal memproses instruksi di Master Orchestrator."
+        );
         setSubmitting(false);
         return;
       }
@@ -409,7 +476,10 @@ export function CommandWorkspace() {
     }
   };
 
-  const handleUpdateTaskStatus = async (taskId: string, nextStatus: TaskStatus) => {
+  const handleUpdateTaskStatus = async (
+    taskId: string,
+    nextStatus: TaskStatus
+  ) => {
     try {
       const res = await fetch(`/api/orchestrator/tasks/${taskId}`, {
         method: "PATCH",
@@ -428,12 +498,19 @@ export function CommandWorkspace() {
     setInput(`Revisi bagian "${stepTitle}": `);
   };
 
+  const visibleTasks = (
+    activeRunId
+      ? dbTasks.filter((t) => t.workflow_run_id === activeRunId)
+      : dbTasks
+  ) as TaskWithPayloads[];
+
   return (
     <div className="space-y-4">
       {isLoggedIn === false && (
         <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-xs text-amber-300 flex flex-wrap items-center justify-between gap-2">
           <span>
-            Anda belum login. Silakan masuk terlebih dahulu agar Master Orchestrator dapat mengakses proyek, memori, dan API key Anda.
+            Anda belum login. Silakan masuk terlebih dahulu agar Master
+            Orchestrator dapat mengakses proyek, memori, dan API key Anda.
           </span>
           <Link
             href="/login"
@@ -450,7 +527,10 @@ export function CommandWorkspace() {
           <div className="space-y-1">
             <p className="font-semibold">Gagal Memproses Orkestrasi</p>
             <p>{errorMsg}</p>
-            <Link href="/providers" className="inline-block underline text-blue-400">
+            <Link
+              href="/providers"
+              className="inline-block underline text-blue-400"
+            >
               Periksa pengaturan AI Provider Manager →
             </Link>
           </div>
@@ -488,7 +568,9 @@ export function CommandWorkspace() {
 
         {/* Mode Switcher */}
         <div className="flex items-center gap-2">
-          <span className="text-xs text-slate-500 dark:text-slate-400">Mode:</span>
+          <span className="text-xs text-slate-500 dark:text-slate-400">
+            Mode:
+          </span>
           <div className="inline-flex rounded-xl border border-slate-200 dark:border-studio-border bg-slate-100 dark:bg-studio-navy p-1">
             <button
               type="button"
@@ -531,13 +613,17 @@ export function CommandWorkspace() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
             {historyRuns.map((run) => {
               const planMeta = getPlanMeta(run);
-              const stepsArr = Array.isArray(planMeta.steps) ? planMeta.steps : [];
+              const stepsArr = Array.isArray(planMeta.steps)
+                ? planMeta.steps
+                : [];
               const stepCount =
                 stepsArr.length > 0
                   ? stepsArr.length
                   : Number(planMeta.totalSteps || run.total_steps || 0);
               const labelTitle = String(
-                planMeta.title || run.title || `Workflow Run #${run.id.slice(0, 8)}`
+                planMeta.title ||
+                  run.title ||
+                  `Workflow Run #${run.id.slice(0, 8)}`
               );
 
               return (
@@ -591,9 +677,12 @@ export function CommandWorkspace() {
             <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-500/15 text-blue-400">
               <Bot className="h-6 w-6" />
             </div>
-            <h3 className="text-base font-semibold">Master Orchestrator Siap</h3>
+            <h3 className="text-base font-semibold">
+              Master Orchestrator Siap
+            </h3>
             <p className="text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-              Setiap instruksi dan rencana yang Anda kirim otomatis tersimpan di riwayat proyek sehingga tidak akan hilang saat Anda berpindah menu.
+              Setiap instruksi dan rencana yang Anda kirim otomatis tersimpan di
+              riwayat proyek sehingga tidak akan hilang saat Anda berpindah menu.
             </p>
             <button
               type="button"
@@ -642,7 +731,9 @@ export function CommandWorkspace() {
                   </span>
                   <span>{msg.timestamp}</span>
                 </div>
-                <p className="text-sm leading-relaxed whitespace-pre-line">{msg.content}</p>
+                <p className="text-sm leading-relaxed whitespace-pre-line">
+                  {msg.content}
+                </p>
 
                 {msg.plan && (
                   <div className="mt-4 space-y-2 border-t border-slate-200 dark:border-studio-border pt-3">
@@ -711,7 +802,8 @@ export function CommandWorkspace() {
                       <div className="pt-1 flex items-center gap-1.5 text-xs text-emerald-500">
                         <CheckCircle2 className="h-4 w-4" />
                         <span>
-                          Rencana disetujui dan siap dijalankan oleh Multi-Agent System.
+                          Rencana disetujui dan siap dijalankan oleh Multi-Agent
+                          System.
                         </span>
                       </div>
                     )}
@@ -774,75 +866,124 @@ export function CommandWorkspace() {
             disabled={submitting || !input.trim()}
             className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 px-5 py-2.5 text-sm font-semibold text-white hover:opacity-95 disabled:opacity-50"
           >
-            <span>{submitting ? "Menyusun Rencana..." : "Kirim Instruksi"}</span>
+            <span>
+              {submitting ? "Menyusun Rencana..." : "Kirim Instruksi"}
+            </span>
             <Send className="h-4 w-4" />
           </button>
         </div>
       </form>
 
       {/* Panel Antrean Tugas Orkestrasi (PostgreSQL) */}
-      {isLoggedIn && dbTasks.length > 0 && (
+      {isLoggedIn && visibleTasks.length > 0 && (
         <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <ListChecks className="h-5 w-5 text-emerald-400" />
               <h2 className="text-base font-semibold">
-                Antrean Tugas Orkestrasi ({dbTasks.length})
+                Antrean Tugas Orkestrasi ({visibleTasks.length})
               </h2>
             </div>
             <Badge variant="emerald">Tersimpan di PostgreSQL</Badge>
           </div>
 
           <div className="space-y-2">
-            {dbTasks.map((t) => (
-              <div
-                key={t.id}
-                className="rounded-xl border border-slate-200/80 dark:border-studio-border bg-slate-50/70 dark:bg-studio-navy/80 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
-              >
-                <div>
-                  <div className="flex items-center gap-2 font-semibold">
-                    <span>
-                      #{t.step_order} • {t.title}
-                    </span>
-                    <Badge
-                      variant={
-                        t.status === "completed"
-                          ? "emerald"
-                          : t.status === "running"
-                          ? "blue"
-                          : "amber"
-                      }
-                    >
-                      {t.status}
-                    </Badge>
-                  </div>
-                  <p className="mt-0.5 text-slate-600 dark:text-slate-400">
-                    {t.instruction}
-                  </p>
-                </div>
+            {visibleTasks.map((t) => {
+              const payload = (t.input_payload ?? {}) as Record<string, unknown>;
+              const out = (t.output_payload ?? {}) as Record<string, unknown>;
+              const stepOrder = Number(
+                payload.stepOrder ?? t.step_order ?? 1
+              );
+              const instructionText = String(
+                payload.instruction ?? t.instruction ?? ""
+              );
+              const isRunningThis = runningTaskId === t.id;
 
-                <div className="flex items-center gap-2 shrink-0">
-                  {t.status !== "running" && t.status !== "completed" && (
-                    <button
-                      type="button"
-                      onClick={() => handleUpdateTaskStatus(t.id, "running")}
-                      className="rounded-lg bg-blue-600/20 border border-blue-500/30 px-2.5 py-1 text-[11px] font-medium text-blue-400 hover:bg-blue-600/30"
-                    >
-                      Mulai
-                    </button>
-                  )}
-                  {t.status !== "completed" && (
-                    <button
-                      type="button"
-                      onClick={() => handleUpdateTaskStatus(t.id, "completed")}
-                      className="rounded-lg bg-emerald-600/20 border border-emerald-500/30 px-2.5 py-1 text-[11px] font-medium text-emerald-400 hover:bg-emerald-600/30"
-                    >
-                      Selesai
-                    </button>
-                  )}
+              return (
+                <div
+                  key={t.id}
+                  className="rounded-xl border border-slate-200/80 dark:border-studio-border bg-slate-50/70 dark:bg-studio-navy/80 p-3 space-y-2 text-xs"
+                >
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2 font-semibold">
+                        <span>
+                          #{stepOrder} • {t.title}
+                        </span>
+                        <Badge
+                          variant={
+                            t.status === "completed"
+                              ? "emerald"
+                              : t.status === "running"
+                              ? "blue"
+                              : t.status === "failed"
+                              ? "rose"
+                              : "amber"
+                          }
+                        >
+                          {t.status}
+                        </Badge>
+                        <span className="text-[11px] font-normal text-slate-400">
+                          {t.progress ?? 0}%
+                        </span>
+                      </div>
+                      <p className="mt-0.5 text-slate-600 dark:text-slate-400">
+                        {instructionText}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      {t.status !== "completed" && (
+                        <button
+                          type="button"
+                          disabled={isRunningThis}
+                          onClick={() => handleRunTask(t.id)}
+                          className="rounded-lg bg-purple-600/20 border border-purple-500/30 px-2.5 py-1 text-[11px] font-medium text-purple-300 hover:bg-purple-600/30 disabled:opacity-50"
+                        >
+                          {isRunningThis ? "Menjalankan..." : "Jalankan Agen"}
+                        </button>
+                      )}
+                      {t.status !== "running" && t.status !== "completed" && (
+                        <button
+                          type="button"
+                          onClick={() => handleUpdateTaskStatus(t.id, "running")}
+                          className="rounded-lg bg-blue-600/20 border border-blue-500/30 px-2.5 py-1 text-[11px] font-medium text-blue-400 hover:bg-blue-600/30"
+                        >
+                          Mulai
+                        </button>
+                      )}
+                      {t.status !== "completed" && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleUpdateTaskStatus(t.id, "completed")
+                          }
+                          className="rounded-lg bg-emerald-600/20 border border-emerald-500/30 px-2.5 py-1 text-[11px] font-medium text-emerald-400 hover:bg-emerald-600/30"
+                        >
+                          Selesai
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {t.status === "completed" &&
+                    Boolean(out.summary || out.contentMarkdown) && (
+                      <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-2.5 space-y-1">
+                        {Boolean(out.summary) && (
+                          <p className="font-medium text-emerald-300">
+                            {String(out.summary)}
+                          </p>
+                        )}
+                        {Boolean(out.contentMarkdown) && (
+                          <p className="whitespace-pre-line text-slate-300 leading-relaxed">
+                            {String(out.contentMarkdown)}
+                          </p>
+                        )}
+                      </div>
+                    )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
