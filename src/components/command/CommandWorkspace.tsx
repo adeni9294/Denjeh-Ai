@@ -34,6 +34,15 @@ interface AttachmentRef {
   note?: string;
 }
 
+type WorkflowRunWithPlan = DbWorkflowRun & {
+  plan_json?: Record<string, unknown> | null;
+};
+
+function getPlanMeta(run: DbWorkflowRun): Record<string, unknown> {
+  const raw = (run as WorkflowRunWithPlan).plan_json;
+  return raw && typeof raw === "object" ? raw : {};
+}
+
 export function CommandWorkspace() {
   const searchParams = useSearchParams();
   const [projects, setProjects] = useState<DbProject[]>([]);
@@ -147,6 +156,11 @@ export function CommandWorkspace() {
       .order("step_order", { ascending: true });
 
     const runTasks = (data as DbTask[]) ?? [];
+    const planMeta = getPlanMeta(run);
+    const runTitle = String(
+      planMeta.title || runTasks[0]?.instruction || `Workflow Run #${run.id.slice(0, 8)}`
+    );
+
     const timeLabel = new Date(run.created_at).toLocaleTimeString("id-ID", {
       hour: "2-digit",
       minute: "2-digit",
@@ -168,7 +182,7 @@ export function CommandWorkspace() {
         sender: "user",
         timestamp: `${timeLabel} WIB`,
         mode: run.trigger_mode === "autonomous" ? "autonomous" : "manual",
-        content: run.title,
+        content: runTitle,
       },
       {
         id: `hist-orch-${run.id}`,
@@ -178,7 +192,8 @@ export function CommandWorkspace() {
         requiresApproval: run.trigger_mode === "manual",
         approved: isApproved,
         content: String(
-          firstPayload.intentSummary ||
+          planMeta.intentSummary ||
+            firstPayload.intentSummary ||
             `Riwayat rencana eksekusi (${runTasks.length} langkah) dipulihkan dari database.`
         ),
         plan: runTasks.map((t) => {
@@ -514,45 +529,57 @@ export function CommandWorkspace() {
             </span>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            {historyRuns.map((run) => (
-              <button
-                key={run.id}
-                type="button"
-                onClick={() => handleOpenHistoryRun(run)}
-                className={`text-left rounded-xl border p-3 transition flex items-start justify-between gap-2 ${
-                  activeRunId === run.id
-                    ? "border-blue-500 bg-blue-500/10"
-                    : "border-slate-200/80 dark:border-studio-border bg-slate-50/70 dark:bg-studio-navy/70 hover:border-blue-500/40"
-                }`}
-              >
-                <div className="min-w-0 flex-1">
-                  <p className="text-xs font-medium truncate">{run.title}</p>
-                  <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
-                    {run.total_steps} langkah •{" "}
-                    {new Date(run.created_at).toLocaleString("id-ID", {
-                      day: "2-digit",
-                      month: "short",
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })}
-                  </p>
-                </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <Badge
-                    variant={
-                      run.status === "completed"
-                        ? "emerald"
-                        : run.status === "running"
-                        ? "blue"
-                        : "amber"
-                    }
-                  >
-                    {run.status === "waiting_approval" ? "Draf" : run.status}
-                  </Badge>
-                  <FolderOpen className="h-3.5 w-3.5 text-slate-400" />
-                </div>
-              </button>
-            ))}
+            {historyRuns.map((run) => {
+              const planMeta = getPlanMeta(run);
+              const stepsArr = Array.isArray(planMeta.steps) ? planMeta.steps : [];
+              const stepCount =
+                stepsArr.length > 0
+                  ? stepsArr.length
+                  : Number(planMeta.totalSteps || run.total_steps || 0);
+              const labelTitle = String(
+                planMeta.title || run.title || `Workflow Run #${run.id.slice(0, 8)}`
+              );
+
+              return (
+                <button
+                  key={run.id}
+                  type="button"
+                  onClick={() => handleOpenHistoryRun(run)}
+                  className={`text-left rounded-xl border p-3 transition flex items-start justify-between gap-2 ${
+                    activeRunId === run.id
+                      ? "border-blue-500 bg-blue-500/10"
+                      : "border-slate-200/80 dark:border-studio-border bg-slate-50/70 dark:bg-studio-navy/70 hover:border-blue-500/40"
+                  }`}
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-medium truncate">{labelTitle}</p>
+                    <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                      {stepCount} langkah •{" "}
+                      {new Date(run.created_at).toLocaleString("id-ID", {
+                        day: "2-digit",
+                        month: "short",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <Badge
+                      variant={
+                        run.status === "completed"
+                          ? "emerald"
+                          : run.status === "running"
+                          ? "blue"
+                          : "amber"
+                      }
+                    >
+                      {run.status === "waiting_approval" ? "Draf" : run.status}
+                    </Badge>
+                    <FolderOpen className="h-3.5 w-3.5 text-slate-400" />
+                  </div>
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
