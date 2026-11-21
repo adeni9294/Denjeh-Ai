@@ -157,25 +157,55 @@ ${instruction}`;
       estimated_cost_usd: 0,
     });
 
-    // 5. Simpan riwayat ke workflow_runs & tasks sesuai kolom asli database
+    // 5. Pastikan ada workflow_id valid untuk workflow_runs
+    let workflowId: string | null = null;
+    const { data: existingWorkflows } = await supabase
+      .from("workflows")
+      .select("id")
+      .limit(1);
+
+    if (existingWorkflows && existingWorkflows.length > 0) {
+      workflowId = String(existingWorkflows[0].id);
+    } else {
+      const { data: createdWorkflow } = await supabase
+        .from("workflows")
+        .insert({
+          user_id: user.id,
+          project_id: projectContext?.id ?? null,
+          name: "Master Orchestrator Default Workflow",
+        })
+        .select("id")
+        .single();
+
+      if (createdWorkflow?.id) {
+        workflowId = String(createdWorkflow.id);
+      }
+    }
+
+    // 6. Simpan riwayat ke workflow_runs & tasks
     const runStatus = mode === "autonomous" ? "running" : "waiting_approval";
+    const runPayload: Record<string, unknown> = {
+      user_id: user.id,
+      project_id: projectContext?.id ?? null,
+      trigger_mode: mode,
+      status: runStatus,
+      plan_json: {
+        title: instruction.slice(0, 140),
+        intentSummary: planResult.intentSummary,
+        totalSteps: planResult.steps.length,
+        steps: planResult.steps,
+        providerUsed: planResult.providerUsed,
+        modelUsed: planResult.modelUsed,
+      },
+    };
+
+    if (workflowId) {
+      runPayload.workflow_id = workflowId;
+    }
+
     const { data: savedRun, error: runErr } = await supabase
       .from("workflow_runs")
-      .insert({
-        user_id: user.id,
-        project_id: projectContext?.id ?? null,
-        workflow_id: null,
-        trigger_mode: mode,
-        status: runStatus,
-        plan_json: {
-          title: instruction.slice(0, 140),
-          intentSummary: planResult.intentSummary,
-          totalSteps: planResult.steps.length,
-          steps: planResult.steps,
-          providerUsed: planResult.providerUsed,
-          modelUsed: planResult.modelUsed,
-        },
-      })
+      .insert(runPayload)
       .select()
       .single();
 
