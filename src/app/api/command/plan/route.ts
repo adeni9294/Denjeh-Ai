@@ -157,20 +157,34 @@ ${instruction}`;
       estimated_cost_usd: 0,
     });
 
-    // 5. Simpan langsung sebagai riwayat di workflow_runs & tasks agar tidak pernah hilang
+    // 5. Simpan riwayat ke workflow_runs & tasks sesuai kolom asli database
     const runStatus = mode === "autonomous" ? "running" : "waiting_approval";
-    const { data: savedRun } = await supabase
+    const { data: savedRun, error: runErr } = await supabase
       .from("workflow_runs")
       .insert({
         user_id: user.id,
         project_id: projectContext?.id ?? null,
         workflow_id: null,
-        title: instruction.slice(0, 140),
         trigger_mode: mode,
         status: runStatus,
+        plan_json: {
+          title: instruction.slice(0, 140),
+          intentSummary: planResult.intentSummary,
+          totalSteps: planResult.steps.length,
+          steps: planResult.steps,
+          providerUsed: planResult.providerUsed,
+          modelUsed: planResult.modelUsed,
+        },
       })
       .select()
       .single();
+
+    if (runErr) {
+      return NextResponse.json(
+        { error: runErr.message || "Gagal menyimpan riwayat workflow_runs." },
+        { status: 500 }
+      );
+    }
 
     if (savedRun) {
       const taskRows = planResult.steps.map((step, idx) => {
@@ -197,7 +211,13 @@ ${instruction}`;
         };
       });
 
-      await supabase.from("tasks").insert(taskRows);
+      const { error: taskErr } = await supabase.from("tasks").insert(taskRows);
+      if (taskErr) {
+        return NextResponse.json(
+          { error: taskErr.message || "Gagal menyimpan tugas ke tabel tasks." },
+          { status: 500 }
+        );
+      }
     }
 
     return NextResponse.json({
