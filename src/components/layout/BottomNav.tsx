@@ -16,7 +16,7 @@ import { MAIN_NAV_ITEMS } from "./Sidebar";
 const MOBILE_PRIMARY_TABS = [
   { label: "Dashboard", href: "/", icon: LayoutDashboard },
   { label: "Command", href: "/command-center", icon: TerminalSquare },
-  { label: "Projects", href: "/#projects", icon: FolderKanban },
+  { label: "Projects", href: "/projects", icon: FolderKanban },
   { label: "Agents", href: "/#agents", icon: Bot },
 ];
 
