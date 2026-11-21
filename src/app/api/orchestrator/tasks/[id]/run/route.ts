@@ -105,8 +105,8 @@ export async function POST(
           .map((t) => {
             const out = (t.output_payload ?? {}) as Record<string, unknown>;
             return `- ${String(t.title ?? "Langkah")}: ${String(
-              out.summary || JSON.stringify(out).slice(0, 500)
-            )}`;
+              out.summary || out.contentMarkdown || ""
+            ).slice(0, 500)}`;
           })
           .join("\n");
       }
@@ -132,12 +132,20 @@ export async function POST(
     const systemPrompt = `Anda adalah ${agentName} dalam sistem DENJEH AI.
 Hasilkan keluaran nyata, detail, dan siap pakai sesuai tugas agen Anda dalam format JSON murni.
 
-WAJIB kembalikan JSON valid dengan skema persis seperti ini:
+WAJIB kembalikan JSON valid dengan skema persis seperti ini (bahasa Indonesia):
 {
-  "summary": "Ringkasan hasil kerja agen secara jelas dalam bahasa Indonesia",
-  "deliverableType": "${estimatedOutput}",
-  "contentMarkdown": "Konten lengkap, terstruktur, dan siap digunakan (cerita, karakter, storyboard, prompt klip, caption, jadwal, atau audit)",
-  "nextNotes": "Catatan penting untuk agen berikutnya"
+  "intentSummary": "Ringkasan hasil kerja agen secara jelas dalam bahasa Indonesia",
+  "recommendedMode": "manual",
+  "steps": [
+    {
+      "stepNumber": 1,
+      "agentCode": "${String(payload.agentCode || "story")}",
+      "agentName": "${agentName}",
+      "action": "Isi detail / konten siap pakai dari hasil kerja agen ini",
+      "dependsOn": "${String(payload.dependsOn || "Previous Steps")}",
+      "estimatedOutput": "${estimatedOutput}"
+    }
+  ]
 }`;
 
     const memoryText =
@@ -170,14 +178,18 @@ ${estimatedOutput}`;
       userPrompt,
     });
 
-    const raw = result.raw as Record<string, unknown>;
+    const formattedStepsText = result.steps
+      .map(
+        (s) =>
+          `${s.stepNumber}. [${s.agentName}] ${s.action} (Output: ${s.estimatedOutput})`
+      )
+      .join("\n\n");
+
     const outputPayload = {
-      summary: String(raw.summary || result.intentSummary || "Tugas selesai diproses."),
-      deliverableType: String(raw.deliverableType || estimatedOutput),
-      contentMarkdown: String(
-        raw.contentMarkdown || JSON.stringify(raw, null, 2)
-      ),
-      nextNotes: String(raw.nextNotes || "-"),
+      summary: result.intentSummary || "Tugas selesai diproses.",
+      deliverableType: estimatedOutput,
+      contentMarkdown: formattedStepsText || result.intentSummary,
+      steps: result.steps,
       providerUsed: result.providerUsed,
       modelUsed: result.modelUsed,
     };
