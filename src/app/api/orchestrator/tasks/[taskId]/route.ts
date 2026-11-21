@@ -8,7 +8,6 @@ const ALLOWED_STATUSES: TaskStatus[] = [
   "running",
   "completed",
   "failed",
-  "skipped",
 ];
 
 export async function PATCH(
