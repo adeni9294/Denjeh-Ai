@@ -228,7 +228,6 @@ ${instruction}`;
           step_order: step.stepNumber || idx + 1,
           title: `${step.agentName}: ${step.action.slice(0, 80)}`,
           instruction: step.action,
-          depends_on_task_ids: [],
           status: initialStatus,
           input_payload: {
             agentCode: step.agentCode || "story",
