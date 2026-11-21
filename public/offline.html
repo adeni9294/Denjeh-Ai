@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Offline — DENJEH AI</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background-color: #060B19;
+      color: #F1F5F9;
+      font-family: system-ui, -apple-system, sans-serif;
+      padding: 24px;
+      text-align: center;
+    }
+    .card {
+      max-width: 420px;
+      background: #111C35;
+      border: 1px solid #1E2D4F;
+      border-radius: 16px;
+      padding: 28px;
+    }
+    h1 { font-size: 1.25rem; margin: 0 0 12px; color: #3B82F6; }
+    p { font-size: 0.925rem; line-height: 1.6; color: #94A3B8; margin: 0 0 20px; }
+    button {
+      background: #3B82F6;
+      color: #fff;
+      border: none;
+      padding: 10px 18px;
+      border-radius: 10px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Koneksi Internet Terputus</h1>
+    <p>
+      Anda sedang berada dalam mode offline. Antarmuka lokal tetap tersedia, namun eksekusi agen AI dan sinkronisasi proyek membutuhkan koneksi internet ke cloud.
+    </p>
+    <button onclick="window.location.reload()">Coba Hubungkan Ulang</button>
+  </div>
+</body>
+</html>
