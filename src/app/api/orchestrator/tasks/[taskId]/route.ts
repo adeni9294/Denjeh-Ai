@@ -4,7 +4,7 @@ import { TaskStatus } from "@/types/studio";
 
 const ALLOWED_STATUSES: TaskStatus[] = [
   "pending",
-  "waiting_approval",
+  "awaiting_approval",
   "running",
   "completed",
   "failed",
