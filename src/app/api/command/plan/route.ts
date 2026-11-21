@@ -168,8 +168,6 @@ ${instruction}`;
         title: instruction.slice(0, 140),
         trigger_mode: mode,
         status: runStatus,
-        current_step: 1,
-        total_steps: planResult.steps.length,
       })
       .select()
       .single();
