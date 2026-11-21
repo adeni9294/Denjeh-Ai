@@ -96,3 +96,33 @@ export interface DbMemory {
   created_at: string;
   updated_at: string;
 }
+export interface DbAiProvider {
+  id: string;
+  user_id: string;
+  provider_key: string;
+  display_name: string;
+  base_url: string | null;
+  encrypted_api_key: string | null;
+  key_last4: string | null;
+  is_enabled: boolean;
+  is_free_tier: boolean;
+  rate_limit_rpm: number;
+  priority_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbAiModel {
+  id: string;
+  user_id: string;
+  provider_id: string;
+  model_identifier: string;
+  display_name: string;
+  capability: string;
+  cost_per_1k_input_usd: number;
+  cost_per_1k_output_usd: number;
+  is_default: boolean;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
