@@ -197,42 +197,72 @@ export function CommandWorkspace() {
     setMessages(restoredMessages);
   };
 
-  const handleApproveRun = async (runId: string | null) => {
-    if (!runId || approvingRun) return;
+  const handleApproveRun = async (msg: CommandMessage) => {
+    if (!msg.plan || msg.plan.length === 0 || approvingRun) return;
     setApprovingRun(true);
     setErrorMsg(null);
+
     try {
       const supabase = createSupabaseBrowserClient();
-      await supabase
-        .from("workflow_runs")
-        .update({ status: "running" })
-        .eq("id", runId);
 
-      const { data: runTasks } = await supabase
-        .from("tasks")
-        .select("id, step_order")
-        .eq("workflow_run_id", runId)
-        .order("step_order", { ascending: true });
-
-      if (runTasks && runTasks.length > 0) {
+      if (activeRunId) {
         await supabase
-          .from("tasks")
-          .update({ status: "running", started_at: new Date().toISOString() })
-          .eq("id", runTasks[0].id);
+          .from("workflow_runs")
+          .update({ status: "running" })
+          .eq("id", activeRunId);
 
-        if (runTasks.length > 1) {
+        const { data: runTasks } = await supabase
+          .from("tasks")
+          .select("id, step_order")
+          .eq("workflow_run_id", activeRunId)
+          .order("step_order", { ascending: true });
+
+        if (runTasks && runTasks.length > 0) {
           await supabase
             .from("tasks")
-            .update({ status: "pending" })
-            .in(
-              "id",
-              runTasks.slice(1).map((t) => t.id)
-            );
+            .update({ status: "running", started_at: new Date().toISOString() })
+            .eq("id", runTasks[0].id);
+
+          if (runTasks.length > 1) {
+            await supabase
+              .from("tasks")
+              .update({ status: "pending" })
+              .in(
+                "id",
+                runTasks.slice(1).map((t) => t.id)
+              );
+          }
+        }
+      } else {
+        const res = await fetch("/api/orchestrator/commit", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            projectId: selectedProject || null,
+            title: msg.content.slice(0, 120),
+            mode: "autonomous",
+            steps: msg.plan,
+          }),
+        });
+
+        const data = (await res.json()) as {
+          ok?: boolean;
+          error?: string;
+          run?: { id: string };
+        };
+
+        if (!res.ok) {
+          setErrorMsg(data.error ?? "Gagal menyetujui dan menyimpan rencana.");
+          return;
+        }
+
+        if (data.run?.id) {
+          setActiveRunId(data.run.id);
         }
       }
 
       setMessages((prev) =>
-        prev.map((m) => (m.plan ? { ...m, approved: true } : m))
+        prev.map((m) => (m.id === msg.id ? { ...m, approved: true } : m))
       );
       await loadHistoryAndTasks(selectedProject);
     } catch (err) {
@@ -637,7 +667,7 @@ export function CommandWorkspace() {
                         <button
                           type="button"
                           disabled={approvingRun}
-                          onClick={() => handleApproveRun(activeRunId)}
+                          onClick={() => handleApproveRun(msg)}
                           className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
                         >
                           <Play className="h-3.5 w-3.5" />
