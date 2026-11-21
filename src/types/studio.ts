@@ -60,3 +60,11 @@ export interface CommandMessage {
   requiresApproval?: boolean;
   approved?: boolean;
 }
+
+export interface UserProfile {
+  id: string;
+  email: string;
+  fullName: string | null;
+  timezone: string;
+  themePreference: "dark" | "light";
+}
