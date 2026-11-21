@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { GeneratedPlanStep } from "@/lib/ai/cloud-runner";
+import { TaskStatus } from "@/types/studio";
 
 export async function POST(req: NextRequest) {
   try {
@@ -69,23 +70,28 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const taskInserts = steps.map((step, idx) => ({
-      run_id: runRow.id,
-      user_id: user.id,
-      project_id: body.projectId || null,
-      agent_code: step.agentCode || "story",
-      step_order: step.stepNumber || idx + 1,
-      title: `${step.agentName}: ${step.action.slice(0, 80)}`,
-      instruction: step.action,
-      depends_on_task_ids: [],
-      status: mode === "autonomous" && idx === 0 ? "running" : "waiting_approval",
-      input_payload: {
-        agentName: step.agentName,
-        dependsOn: step.dependsOn,
-        estimatedOutput: step.estimatedOutput,
-      },
-      output_payload: {},
-    }));
+    const taskInserts = steps.map((step, idx) => {
+      const initialStatus: TaskStatus =
+        mode === "autonomous" && idx === 0 ? "running" : "awaiting_approval";
+
+      return {
+        workflow_run_id: runRow.id,
+        user_id: user.id,
+        project_id: body.projectId || null,
+        agent_code: step.agentCode || "story",
+        step_order: step.stepNumber || idx + 1,
+        title: `${step.agentName}: ${step.action.slice(0, 80)}`,
+        instruction: step.action,
+        depends_on_task_ids: [],
+        status: initialStatus,
+        input_payload: {
+          agentName: step.agentName,
+          dependsOn: step.dependsOn,
+          estimatedOutput: step.estimatedOutput,
+        },
+        output_payload: {},
+      };
+    });
 
     const { data: createdTasks, error: taskErr } = await supabase
       .from("tasks")
