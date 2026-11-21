@@ -4,7 +4,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
-import { CommandMessage, DbProject } from "@/types/studio";
+import { CommandMessage, DbProject, DbTask, TaskStatus } from "@/types/studio";
 import { Badge } from "@/components/ui/Badge";
 import {
   Bot,
@@ -17,6 +17,7 @@ import {
   User,
   AlertCircle,
   X,
+  ListChecks,
 } from "lucide-react";
 
 interface AttachmentRef {
@@ -33,9 +34,32 @@ export function CommandWorkspace() {
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<AttachmentRef[]>([]);
   const [messages, setMessages] = useState<CommandMessage[]>([]);
+  const [dbTasks, setDbTasks] = useState<DbTask[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [committingPlan, setCommittingPlan] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isLoggedIn, setIsLoggedIn] = useState<boolean | null>(null);
+
+  const loadTasksForProject = useCallback(async (projectId: string) => {
+    try {
+      const supabase = createSupabaseBrowserClient();
+      let query = supabase
+        .from("tasks")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .order("step_order", { ascending: true })
+        .limit(20);
+
+      if (projectId) {
+        query = query.eq("project_id", projectId);
+      }
+
+      const { data } = await query;
+      setDbTasks((data as DbTask[]) ?? []);
+    } catch {
+      // Abaikan jika gagal memuat task awal
+    }
+  }, []);
 
   const loadProjects = useCallback(async () => {
     try {
@@ -58,17 +82,25 @@ export function CommandWorkspace() {
 
       const rows = (data as DbProject[]) ?? [];
       setProjects(rows);
-      if (rows.length > 0) {
-        setSelectedProject((prev) => prev || rows[0].id);
+      const activeId = rows.length > 0 ? selectedProject || rows[0].id : "";
+      if (activeId && !selectedProject) {
+        setSelectedProject(activeId);
       }
+      await loadTasksForProject(activeId);
     } catch {
       setIsLoggedIn(false);
     }
-  }, []);
+  }, [loadTasksForProject, selectedProject]);
 
   useEffect(() => {
     loadProjects();
   }, [loadProjects]);
+
+  useEffect(() => {
+    if (isLoggedIn) {
+      loadTasksForProject(selectedProject);
+    }
+  }, [selectedProject, isLoggedIn, loadTasksForProject]);
 
   useEffect(() => {
     const initialQuery = searchParams.get("q");
@@ -92,6 +124,42 @@ export function CommandWorkspace() {
 
   const removeAttachment = (index: number) => {
     setAttachments((prev) => prev.filter((_, idx) => idx !== index));
+  };
+
+  const handleCommitPlanToDb = async (
+    msg: CommandMessage,
+    targetMode: "manual" | "autonomous"
+  ) => {
+    if (!msg.plan || msg.plan.length === 0 || committingPlan) return;
+    setCommittingPlan(true);
+    setErrorMsg(null);
+    try {
+      const res = await fetch("/api/orchestrator/commit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: selectedProject || null,
+          title: msg.content.slice(0, 120),
+          mode: targetMode,
+          steps: msg.plan,
+        }),
+      });
+      const data = (await res.json()) as { ok?: boolean; error?: string };
+      if (!res.ok) {
+        setErrorMsg(data.error ?? "Gagal menyimpan rencana ke database.");
+      } else {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === msg.id ? { ...m, approved: true } : m))
+        );
+        await loadTasksForProject(selectedProject);
+      }
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : "Gagal menyimpan rencana ke database."
+      );
+    } finally {
+      setCommittingPlan(false);
+    }
   };
 
   const handleSendCommand = async (e: React.FormEvent) => {
@@ -152,6 +220,7 @@ export function CommandWorkspace() {
           intentSummary: string;
           steps: {
             stepNumber: number;
+            agentCode: string;
             agentName: string;
             action: string;
             dependsOn: string;
@@ -181,6 +250,10 @@ export function CommandWorkspace() {
 
       setMessages((prev) => [...prev, orchestratorMsg]);
       setAttachments([]);
+
+      if (mode === "autonomous") {
+        await handleCommitPlanToDb(orchestratorMsg, "autonomous");
+      }
     } catch (err) {
       setErrorMsg(
         err instanceof Error ? err.message : "Koneksi ke server gagal."
@@ -190,10 +263,19 @@ export function CommandWorkspace() {
     }
   };
 
-  const handleApprovePlan = (msgId: string) => {
-    setMessages((prev) =>
-      prev.map((m) => (m.id === msgId ? { ...m, approved: true } : m))
-    );
+  const handleUpdateTaskStatus = async (taskId: string, nextStatus: TaskStatus) => {
+    try {
+      const res = await fetch(`/api/orchestrator/tasks/${taskId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      if (res.ok) {
+        await loadTasksForProject(selectedProject);
+      }
+    } catch {
+      // Abaikan error sesaat
+    }
   };
 
   const handleRequestRevision = (stepTitle: string) => {
@@ -220,7 +302,7 @@ export function CommandWorkspace() {
         <div className="flex items-start gap-2.5 rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 text-xs text-rose-400">
           <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
           <div className="space-y-1">
-            <p className="font-semibold">Gagal Menyusun Rencana</p>
+            <p className="font-semibold">Gagal Memproses Orkestrasi</p>
             <p>{errorMsg}</p>
             <Link href="/providers" className="inline-block underline text-blue-400">
               Periksa pengaturan AI Provider Manager →
@@ -285,15 +367,15 @@ export function CommandWorkspace() {
       </div>
 
       {/* Conversation & Execution Plan Feed */}
-      <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-5 min-h-[340px] max-h-[62vh] overflow-y-auto">
+      <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-5 min-h-[300px] max-h-[58vh] overflow-y-auto">
         {messages.length === 0 ? (
-          <div className="py-10 text-center space-y-3 max-w-xl mx-auto">
+          <div className="py-8 text-center space-y-3 max-w-xl mx-auto">
             <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-500/15 text-blue-400">
               <Bot className="h-6 w-6" />
             </div>
             <h3 className="text-base font-semibold">Master Orchestrator Siap</h3>
             <p className="text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-              Tulis instruksi produksi kreatif di bawah. Master Orchestrator akan menarik memori proyek terpilih dan menyusun rencana kerja lintas agen secara terstruktur.
+              Tulis instruksi produksi kreatif di bawah. Master Orchestrator akan menarik memori proyek terpilih dan menyusun rencana kerja lintas agen yang dapat disetujui serta disimpan ke antrean database.
             </p>
             <button
               type="button"
@@ -352,7 +434,7 @@ export function CommandWorkspace() {
                         Rencana Eksekusi Multi-Agen (JSON DAG)
                       </span>
                       <Badge variant={msg.approved ? "emerald" : "amber"}>
-                        {msg.approved ? "Disetujui" : "Menunggu Persetujuan"}
+                        {msg.approved ? "Tersimpan di Antrean" : "Menunggu Persetujuan"}
                       </Badge>
                     </div>
 
@@ -394,11 +476,16 @@ export function CommandWorkspace() {
                       <div className="pt-2 flex justify-end">
                         <button
                           type="button"
-                          onClick={() => handleApprovePlan(msg.id)}
-                          className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500"
+                          disabled={committingPlan}
+                          onClick={() => handleCommitPlanToDb(msg, "manual")}
+                          className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
                         >
                           <Play className="h-3.5 w-3.5" />
-                          <span>Setujui Rencana Eksekusi</span>
+                          <span>
+                            {committingPlan
+                              ? "Menyimpan ke Antrean..."
+                              : "Setujui & Masukkan ke Antrean Tugas"}
+                          </span>
                         </button>
                       </div>
                     )}
@@ -407,7 +494,7 @@ export function CommandWorkspace() {
                       <div className="pt-1 flex items-center gap-1.5 text-xs text-emerald-500">
                         <CheckCircle2 className="h-4 w-4" />
                         <span>
-                          Rencana disetujui. Antrean eksekusi paralel tiap agen akan dihubungkan di Fase 6–7.
+                          Rencana tersimpan sebagai workflow run & tugas DAG di PostgreSQL.
                         </span>
                       </div>
                     )}
@@ -475,6 +562,73 @@ export function CommandWorkspace() {
           </button>
         </div>
       </form>
+
+      {/* Panel Antrean Tugas Orkestrasi (PostgreSQL) */}
+      {isLoggedIn && dbTasks.length > 0 && (
+        <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <ListChecks className="h-5 w-5 text-emerald-400" />
+              <h2 className="text-base font-semibold">
+                Antrean Tugas Orkestrasi ({dbTasks.length})
+              </h2>
+            </div>
+            <Badge variant="emerald">Tersimpan di PostgreSQL</Badge>
+          </div>
+
+          <div className="space-y-2">
+            {dbTasks.map((t) => (
+              <div
+                key={t.id}
+                className="rounded-xl border border-slate-200/80 dark:border-studio-border bg-slate-50/70 dark:bg-studio-navy/80 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
+              >
+                <div>
+                  <div className="flex items-center gap-2 font-semibold">
+                    <span>
+                      #{t.step_order} • {t.title}
+                    </span>
+                    <Badge
+                      variant={
+                        t.status === "completed"
+                          ? "emerald"
+                          : t.status === "running"
+                          ? "blue"
+                          : "amber"
+                      }
+                    >
+                      {t.status}
+                    </Badge>
+                  </div>
+                  <p className="mt-0.5 text-slate-600 dark:text-slate-400">
+                    {t.instruction}
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  {t.status !== "running" && t.status !== "completed" && (
+                    <button
+                      type="button"
+                      onClick={() => handleUpdateTaskStatus(t.id, "running")}
+                      className="rounded-lg bg-blue-600/20 border border-blue-500/30 px-2.5 py-1 text-[11px] font-medium text-blue-400 hover:bg-blue-600/30"
+                    >
+                      Mulai
+                    </button>
+                  )}
+                  {t.status !== "completed" && (
+                    <button
+                      type="button"
+                      onClick={() => handleUpdateTaskStatus(t.id, "completed")}
+                      className="rounded-lg bg-emerald-600/20 border border-emerald-500/30 px-2.5 py-1 text-[11px] font-medium text-emerald-400 hover:bg-emerald-600/30"
+                    >
+                      Selesai
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
