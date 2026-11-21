@@ -183,7 +183,7 @@ ${instruction}`;
     }
 
     // 6. Simpan riwayat ke workflow_runs & tasks
-    const runStatus = mode === "autonomous" ? "running" : "waiting_approval";
+    const runStatus = mode === "autonomous" ? "running" : "pending";
     const runPayload: Record<string, unknown> = {
       user_id: user.id,
       project_id: projectContext?.id ?? null,
