@@ -30,7 +30,7 @@ export const MAIN_NAV_ITEMS: NavItem[] = [
   { label: "Projects", href: "/projects", icon: FolderKanban, phaseReady: true },
   { label: "Agent Studio", href: "/#agents", icon: Bot, phaseReady: false },
   { label: "Workflow Builder", href: "/#workflows", icon: GitBranch, phaseReady: false },
-  { label: "Content Studio", href: "/#content-studio", icon: Sparkles, phaseReady: false },
+{ label: "Content Studio", href: "/content-studio", icon: Sparkles, phaseReady: true },
   { label: "Content Planner", href: "/#planner", icon: CalendarDays, phaseReady: false },
   { label: "Publishing Center", href: "/#publishing", icon: Send, phaseReady: false },
   { label: "Analytics", href: "/#analytics", icon: BarChart3, phaseReady: false },
