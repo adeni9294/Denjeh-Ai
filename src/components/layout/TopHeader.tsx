@@ -56,7 +56,7 @@ export function TopHeader() {
 
       {/* Desktop/Tablet Context Info */}
       <div className="hidden sm:flex items-center gap-3">
-        <Badge variant="blue">Fase 5: AI Command Center</Badge>
+<Badge variant="blue">Fase 6: Master Orchestrator</Badge>
         <span className="text-xs text-slate-500 dark:text-slate-400">
           Timezone: Asia/Jakarta (WIB)
         </span>
