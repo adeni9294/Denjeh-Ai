@@ -182,7 +182,7 @@ ${instruction}`;
       }
     }
 
-    // 6. Simpan riwayat ke workflow_runs & tasks
+    // 6. Simpan riwayat ke workflow_runs & tasks sesuai DDL asli
     const runStatus = mode === "autonomous" ? "running" : "pending";
     const runPayload: Record<string, unknown> = {
       user_id: user.id,
@@ -218,17 +218,22 @@ ${instruction}`;
 
     if (savedRun) {
       const taskRows = planResult.steps.map((step, idx) => {
+        const stepOrder = step.stepNumber || idx + 1;
         const initialStatus: TaskStatus =
           mode === "autonomous" && idx === 0 ? "running" : "awaiting_approval";
+        const clampedPriority = Math.min(10, Math.max(1, stepOrder));
 
         return {
           workflow_run_id: savedRun.id,
           user_id: user.id,
           project_id: projectContext?.id ?? null,
-          step_order: step.stepNumber || idx + 1,
+          idempotency_key: `${savedRun.id}-step-${stepOrder}`,
           title: `${step.agentName}: ${step.action.slice(0, 80)}`,
           status: initialStatus,
+          priority: clampedPriority,
+          progress: 0,
           input_payload: {
+            stepOrder,
             instruction: step.action,
             agentCode: step.agentCode || "story",
             agentName: step.agentName,
@@ -236,6 +241,7 @@ ${instruction}`;
             estimatedOutput: step.estimatedOutput,
             intentSummary: planResult.intentSummary,
           },
+          checkpoint_state: {},
           output_payload: {},
         };
       });
