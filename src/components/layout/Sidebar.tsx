@@ -34,7 +34,7 @@ export const MAIN_NAV_ITEMS: NavItem[] = [
   { label: "Content Planner", href: "/#planner", icon: CalendarDays, phaseReady: false },
   { label: "Publishing Center", href: "/#publishing", icon: Send, phaseReady: false },
   { label: "Analytics", href: "/#analytics", icon: BarChart3, phaseReady: false },
-  { label: "Memory & Settings", href: "/providers", icon: Database, phaseReady: true },
+  { label: "Memory & Settings", href: "/memory", icon: Database, phaseReady: true },
 ];
 
 export function Sidebar() {
