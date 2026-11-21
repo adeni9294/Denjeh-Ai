@@ -29,8 +29,6 @@ export async function POST(req: NextRequest) {
       title?: string;
       mode?: "manual" | "autonomous";
       steps?: GeneratedPlanStep[];
-      providerUsed?: string;
-      modelUsed?: string;
     };
 
     const steps = Array.isArray(body.steps) ? body.steps : [];
@@ -55,10 +53,6 @@ export async function POST(req: NextRequest) {
         status: runStatus,
         current_step: 1,
         total_steps: steps.length,
-        context_snapshot: {
-          providerUsed: body.providerUsed ?? "gemini",
-          modelUsed: body.modelUsed ?? "default",
-        },
       })
       .select()
       .single();
