@@ -5,10 +5,14 @@ import { DbAiModel, DbAiProvider, DbMemory, DbProject } from "@/types/studio";
 
 export async function POST(
   _req: NextRequest,
-  context: { params: Promise<{ id: string }> }
+  context: { params: Promise<{ taskId: string }> }
 ) {
+  let resolvedTaskId = "";
+
   try {
-    const { id: taskId } = await context.params;
+    const { taskId } = await context.params;
+    resolvedTaskId = taskId;
+
     if (!taskId) {
       return NextResponse.json(
         { error: "ID tugas tidak valid." },
@@ -255,13 +259,12 @@ ${estimatedOutput}`;
       err instanceof Error ? err.message : "Gagal mengeksekusi tugas agen.";
 
     try {
-      const { id: taskId } = await context.params;
       const supabase = await createSupabaseServerClient();
-      if (supabase && taskId) {
+      if (supabase && resolvedTaskId) {
         await supabase
           .from("tasks")
           .update({ status: "failed", error_message: message })
-          .eq("id", taskId);
+          .eq("id", resolvedTaskId);
       }
     } catch {
       // Abaikan error saat mencatat status gagal
