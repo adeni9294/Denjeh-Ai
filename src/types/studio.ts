@@ -126,3 +126,45 @@ export interface DbAiModel {
   created_at: string;
   updated_at: string;
 }
+export type TaskStatus =
+  | "pending"
+  | "waiting_approval"
+  | "running"
+  | "completed"
+  | "failed"
+  | "skipped";
+
+export interface DbWorkflowRun {
+  id: string;
+  user_id: string;
+  project_id: string | null;
+  workflow_id: string | null;
+  title: string;
+  trigger_mode: "manual" | "autonomous" | "scheduled";
+  status: "queued" | "running" | "waiting_approval" | "completed" | "failed";
+  current_step: number;
+  total_steps: number;
+  context_snapshot: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbTask {
+  id: string;
+  run_id: string;
+  user_id: string;
+  project_id: string | null;
+  agent_code: string;
+  step_order: number;
+  title: string;
+  instruction: string;
+  depends_on_task_ids: string[];
+  status: TaskStatus;
+  input_payload: Record<string, unknown>;
+  output_payload: Record<string, unknown>;
+  error_message: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
