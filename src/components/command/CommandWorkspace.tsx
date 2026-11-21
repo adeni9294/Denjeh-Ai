@@ -64,6 +64,7 @@ export function CommandWorkspace() {
   const [submitting, setSubmitting] = useState(false);
   const [approvingRun, setApprovingRun] = useState(false);
   const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
+  const [runningChain, setRunningChain] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isLoggedIn, setIsLoggedIn] = useState<boolean | null>(null);
 
@@ -330,7 +331,7 @@ export function CommandWorkspace() {
   };
 
   const handleRunTask = async (taskId: string) => {
-    if (runningTaskId) return;
+    if (runningTaskId || runningChain) return;
     setRunningTaskId(taskId);
     setErrorMsg(null);
 
@@ -352,6 +353,77 @@ export function CommandWorkspace() {
       );
     } finally {
       setRunningTaskId(null);
+    }
+  };
+
+  const handleRunChain = async () => {
+    if (runningChain || runningTaskId) return;
+    setRunningChain(true);
+    setErrorMsg(null);
+
+    try {
+      const supabase = createSupabaseBrowserClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+
+      let query = supabase
+        .from("tasks")
+        .select("*")
+        .eq("user_id", user.id)
+        .neq("status", "completed");
+
+      if (activeRunId) {
+        query = query.eq("workflow_run_id", activeRunId);
+      } else if (selectedProject) {
+        query = query.eq("project_id", selectedProject);
+      }
+
+      const { data } = await query;
+      const pendingTasks = ((data as TaskWithPayloads[]) ?? []).sort(
+        (a, b) => {
+          const aOrder = Number(
+            (a.input_payload ?? {}).stepOrder ?? a.step_order ?? 0
+          );
+          const bOrder = Number(
+            (b.input_payload ?? {}).stepOrder ?? b.step_order ?? 0
+          );
+          return aOrder - bOrder;
+        }
+      );
+
+      for (const task of pendingTasks) {
+        setRunningTaskId(task.id);
+        const res = await fetch(`/api/orchestrator/tasks/${task.id}/run`, {
+          method: "POST",
+        });
+        const resultData = (await res.json()) as {
+          ok?: boolean;
+          error?: string;
+        };
+
+        await loadHistoryAndTasks(selectedProject);
+
+        if (!res.ok) {
+          setErrorMsg(
+            resultData.error ??
+              `Gagal menjalankan langkah #${Number(
+                (task.input_payload ?? {}).stepOrder ?? 1
+              )}: ${task.title}`
+          );
+          break;
+        }
+      }
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : "Terjadi kesalahan saat menjalankan antrean berantai."
+      );
+    } finally {
+      setRunningTaskId(null);
+      setRunningChain(false);
     }
   };
 
@@ -877,14 +949,28 @@ export function CommandWorkspace() {
       {/* Panel Antrean Tugas Orkestrasi (PostgreSQL) */}
       {isLoggedIn && visibleTasks.length > 0 && (
         <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
             <div className="flex items-center gap-2">
               <ListChecks className="h-5 w-5 text-emerald-400" />
               <h2 className="text-base font-semibold">
                 Antrean Tugas Orkestrasi ({visibleTasks.length})
               </h2>
             </div>
-            <Badge variant="emerald">Tersimpan di PostgreSQL</Badge>
+            <div className="flex items-center gap-2">
+              {visibleTasks.some((t) => t.status !== "completed") && (
+                <button
+                  type="button"
+                  disabled={runningChain || Boolean(runningTaskId)}
+                  onClick={handleRunChain}
+                  className="rounded-lg bg-gradient-to-r from-purple-600 to-blue-600 px-3 py-1 text-[11px] font-semibold text-white hover:opacity-95 disabled:opacity-50"
+                >
+                  {runningChain
+                    ? "Menjalankan Berantai..."
+                    : "Jalankan Berantai"}
+                </button>
+              )}
+              <Badge variant="emerald">Tersimpan di PostgreSQL</Badge>
+            </div>
           </div>
 
           <div className="space-y-2">
@@ -936,7 +1022,7 @@ export function CommandWorkspace() {
                       {t.status !== "completed" && (
                         <button
                           type="button"
-                          disabled={isRunningThis}
+                          disabled={isRunningThis || runningChain}
                           onClick={() => handleRunTask(t.id)}
                           className="rounded-lg bg-purple-600/20 border border-purple-500/30 px-2.5 py-1 text-[11px] font-medium text-purple-300 hover:bg-purple-600/30 disabled:opacity-50"
                         >
