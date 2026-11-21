@@ -26,6 +26,10 @@ import {
   ListChecks,
   History,
   FolderOpen,
+  Copy,
+  Check,
+  Download,
+  BookmarkPlus,
 } from "lucide-react";
 
 interface AttachmentRef {
@@ -50,6 +54,30 @@ function getPlanMeta(run: DbWorkflowRun): Record<string, unknown> {
   return raw && typeof raw === "object" ? raw : {};
 }
 
+function formatTaskOutputText(
+  t: TaskWithPayloads,
+  out: Record<string, unknown>
+): string {
+  const summary = String(out.summary ?? "").trim();
+  const contentMarkdown = String(out.contentMarkdown ?? "").trim();
+  if (summary && contentMarkdown) {
+    return `${summary}\n\n${contentMarkdown}`;
+  }
+  return summary || contentMarkdown || t.title;
+}
+
+function triggerMarkdownDownload(filename: string, markdown: string) {
+  const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 export function CommandWorkspace() {
   const searchParams = useSearchParams();
   const [projects, setProjects] = useState<DbProject[]>([]);
@@ -65,6 +93,13 @@ export function CommandWorkspace() {
   const [approvingRun, setApprovingRun] = useState(false);
   const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
   const [runningChain, setRunningChain] = useState(false);
+  const [copiedTaskId, setCopiedTaskId] = useState<string | null>(null);
+  const [savingMemoryTaskId, setSavingMemoryTaskId] = useState<string | null>(
+    null
+  );
+  const [savedMemoryTaskIds, setSavedMemoryTaskIds] = useState<
+    Record<string, boolean>
+  >({});
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isLoggedIn, setIsLoggedIn] = useState<boolean | null>(null);
 
@@ -427,6 +462,90 @@ export function CommandWorkspace() {
     }
   };
 
+  const handleCopyTaskOutput = async (
+    taskId: string,
+    t: TaskWithPayloads,
+    out: Record<string, unknown>
+  ) => {
+    const text = formatTaskOutputText(t, out);
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedTaskId(taskId);
+      setTimeout(() => {
+        setCopiedTaskId((prev) => (prev === taskId ? null : prev));
+      }, 2000);
+    } catch {
+      setErrorMsg("Gagal menyalin teks ke clipboard.");
+    }
+  };
+
+  const handleDownloadTaskOutput = (
+    t: TaskWithPayloads,
+    out: Record<string, unknown>
+  ) => {
+    const payload = (t.input_payload ?? {}) as Record<string, unknown>;
+    const stepOrder = Number(payload.stepOrder ?? t.step_order ?? 1);
+    const agentCode = String(payload.agentCode ?? "agent")
+      .toLowerCase()
+      .replace(/[^a-z0-9-_]+/g, "-");
+    const markdown = `# Langkah #${stepOrder} — ${t.title}\n\n${formatTaskOutputText(
+      t,
+      out
+    )}\n`;
+    triggerMarkdownDownload(`step-${stepOrder}-${agentCode}.md`, markdown);
+  };
+
+  const handleSaveTaskToMemory = async (
+    t: TaskWithPayloads,
+    out: Record<string, unknown>
+  ) => {
+    if (savingMemoryTaskId) return;
+    setSavingMemoryTaskId(t.id);
+    setErrorMsg(null);
+
+    try {
+      const supabase = createSupabaseBrowserClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        setErrorMsg("Sesi tidak valid. Silakan login ulang.");
+        return;
+      }
+
+      const payload = (t.input_payload ?? {}) as Record<string, unknown>;
+      const stepOrder = Number(payload.stepOrder ?? t.step_order ?? 1);
+      const agentCode = String(payload.agentCode ?? "agent")
+        .toLowerCase()
+        .replace(/[^a-z0-9-_]+/g, "_");
+      const content = formatTaskOutputText(t, out).slice(0, 3500);
+
+      const { error } = await supabase.from("memories").insert({
+        user_id: user.id,
+        project_id: t.project_id || selectedProject || null,
+        scope: "project",
+        memory_key: `step_${stepOrder}_${agentCode}_${t.id.slice(0, 6)}`,
+        content,
+        importance: 7,
+      });
+
+      if (error) {
+        setErrorMsg(error.message || "Gagal menyimpan hasil agen ke memori.");
+        return;
+      }
+
+      setSavedMemoryTaskIds((prev) => ({ ...prev, [t.id]: true }));
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : "Gagal menyimpan hasil agen ke memori proyek."
+      );
+    } finally {
+      setSavingMemoryTaskId(null);
+    }
+  };
+
   const handleFileAttach = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
@@ -575,6 +694,35 @@ export function CommandWorkspace() {
   const visibleTasks = activeRunId
     ? typedDbTasks.filter((t) => t.workflow_run_id === activeRunId)
     : typedDbTasks;
+
+  const activeProjectObj = projects.find((p) => p.id === selectedProject);
+
+  const handleExportAllPackage = () => {
+    const completedItems = visibleTasks.filter((t) => t.status === "completed");
+    if (completedItems.length === 0) return;
+
+    const projectName = activeProjectObj?.name || "Proyek DNAverse";
+    const lines = completedItems.map((t) => {
+      const payload = (t.input_payload ?? {}) as Record<string, unknown>;
+      const out = (t.output_payload ?? {}) as Record<string, unknown>;
+      const stepOrder = Number(payload.stepOrder ?? t.step_order ?? 1);
+      return `## Langkah #${stepOrder} — ${t.title}\n\n${formatTaskOutputText(
+        t,
+        out
+      )}`;
+    });
+
+    const slug = projectName
+      .toLowerCase()
+      .replace(/[^a-z0-9-_]+/g, "-")
+      .replace(/^-|-$/g, "");
+    triggerMarkdownDownload(
+      `${slug || "dnaverse"}-paket-agen.md`,
+      `# Paket Artefak Multi-Agen: ${projectName}\n\n${lines.join(
+        "\n\n---\n\n"
+      )}\n`
+    );
+  };
 
   return (
     <div className="space-y-4">
@@ -956,7 +1104,17 @@ export function CommandWorkspace() {
                 Antrean Tugas Orkestrasi ({visibleTasks.length})
               </h2>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              {visibleTasks.some((t) => t.status === "completed") && (
+                <button
+                  type="button"
+                  onClick={handleExportAllPackage}
+                  className="inline-flex items-center gap-1 rounded-lg border border-blue-500/30 bg-blue-500/15 px-3 py-1 text-[11px] font-semibold text-blue-300 hover:bg-blue-500/25"
+                >
+                  <Download className="h-3 w-3" />
+                  <span>Ekspor Paket .md</span>
+                </button>
+              )}
               {visibleTasks.some((t) => t.status !== "completed") && (
                 <button
                   type="button"
@@ -984,6 +1142,9 @@ export function CommandWorkspace() {
                 payload.instruction ?? t.instruction ?? ""
               );
               const isRunningThis = runningTaskId === t.id;
+              const isCopiedThis = copiedTaskId === t.id;
+              const isSavingMemThis = savingMemoryTaskId === t.id;
+              const isSavedMemThis = Boolean(savedMemoryTaskIds[t.id]);
 
               return (
                 <div
@@ -1018,7 +1179,7 @@ export function CommandWorkspace() {
                       </p>
                     </div>
 
-                    <div className="flex items-center gap-2 shrink-0">
+                    <div className="flex items-center gap-2 shrink-0 flex-wrap">
                       {t.status !== "completed" && (
                         <button
                           type="button"
@@ -1054,7 +1215,54 @@ export function CommandWorkspace() {
 
                   {t.status === "completed" &&
                     Boolean(out.summary || out.contentMarkdown) && (
-                      <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-2.5 space-y-1">
+                      <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-2.5 space-y-2">
+                        <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleCopyTaskOutput(t.id, t, out)
+                            }
+                            className="inline-flex items-center gap-1 rounded-md border border-slate-600/40 bg-slate-800/70 px-2 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-700/70"
+                          >
+                            {isCopiedThis ? (
+                              <>
+                                <Check className="h-3 w-3 text-emerald-400" />
+                                <span>Tersalin</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="h-3 w-3 text-blue-400" />
+                                <span>Salin</span>
+                              </>
+                            )}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleDownloadTaskOutput(t, out)}
+                            className="inline-flex items-center gap-1 rounded-md border border-slate-600/40 bg-slate-800/70 px-2 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-700/70"
+                          >
+                            <Download className="h-3 w-3 text-purple-400" />
+                            <span>Unduh .md</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={isSavingMemThis || isSavedMemThis}
+                            onClick={() => handleSaveTaskToMemory(t, out)}
+                            className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-600/20 px-2 py-1 text-[11px] font-medium text-emerald-300 hover:bg-emerald-600/30 disabled:opacity-60"
+                          >
+                            <BookmarkPlus className="h-3 w-3" />
+                            <span>
+                              {isSavedMemThis
+                                ? "Tersimpan di Memori"
+                                : isSavingMemThis
+                                ? "Menyimpan..."
+                                : "Simpan ke Memori"}
+                            </span>
+                          </button>
+                        </div>
+
                         {Boolean(out.summary) && (
                           <p className="font-medium text-emerald-300">
                             {String(out.summary)}
