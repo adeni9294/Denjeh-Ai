@@ -39,6 +39,7 @@ type WorkflowRunWithPlan = DbWorkflowRun & {
 };
 
 type TaskWithPayloads = DbTask & {
+  workflow_run_id?: string | null;
   input_payload?: Record<string, unknown> | null;
   output_payload?: Record<string, unknown> | null;
   progress?: number | null;
@@ -498,11 +499,10 @@ export function CommandWorkspace() {
     setInput(`Revisi bagian "${stepTitle}": `);
   };
 
-  const visibleTasks = (
-    activeRunId
-      ? dbTasks.filter((t) => t.workflow_run_id === activeRunId)
-      : dbTasks
-  ) as TaskWithPayloads[];
+  const typedDbTasks = dbTasks as TaskWithPayloads[];
+  const visibleTasks = activeRunId
+    ? typedDbTasks.filter((t) => t.workflow_run_id === activeRunId)
+    : typedDbTasks;
 
   return (
     <div className="space-y-4">
