@@ -68,3 +68,31 @@ export interface UserProfile {
   timezone: string;
   themePreference: "dark" | "light";
 }
+export type MemoryScope = "user" | "project" | "agent" | "task";
+
+export interface DbProject {
+  id: string;
+  user_id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  system_instructions: string | null;
+  default_mode: "manual" | "autonomous";
+  status: "active" | "draft" | "archived";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbMemory {
+  id: string;
+  user_id: string;
+  project_id: string | null;
+  agent_id: string | null;
+  task_id: string | null;
+  scope: MemoryScope;
+  memory_key: string;
+  content: string;
+  importance: number;
+  created_at: string;
+  updated_at: string;
+}
