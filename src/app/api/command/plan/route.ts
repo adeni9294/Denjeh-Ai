@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { generatePlanWithFallback } from "@/lib/ai/cloud-runner";
-import { DbAiModel, DbAiProvider, DbMemory, DbProject } from "@/types/studio";
+import {
+  DbAiModel,
+  DbAiProvider,
+  DbMemory,
+  DbProject,
+  TaskStatus,
+} from "@/types/studio";
 
 export async function POST(req: NextRequest) {
   try {
@@ -40,7 +46,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1. Ambil konteks proyek & memori terisolasi jika projectId dipilih
+    const mode = body.mode === "autonomous" ? "autonomous" : "manual";
+
+    // 1. Ambil konteks proyek & memori terisolasi
     let projectContext: DbProject | null = null;
     let memories: DbMemory[] = [];
 
@@ -61,7 +69,7 @@ export async function POST(req: NextRequest) {
       memories = (memRows as DbMemory[]) ?? [];
     }
 
-    // 2. Ambil daftar AI provider & model aktif milik user
+    // 2. Ambil daftar AI provider & model aktif
     const [{ data: providers }, { data: models }] = await Promise.all([
       supabase
         .from("ai_providers")
@@ -118,7 +126,7 @@ WAJIB kembalikan JSON valid dengan skema persis seperti ini (bahasa Indonesia un
     const userPrompt = `PROYEK AKTIF: ${projectContext?.name ?? "Tanpa Proyek Khusus"}
 DESKRIPSI PROYEK: ${projectContext?.description ?? "-"}
 INSTRUKSI SISTEM PROYEK: ${projectContext?.system_instructions ?? "-"}
-MODE OPERASI DIPILIH: ${body.mode ?? "manual"}
+MODE OPERASI DIPILIH: ${mode}
 
 MEMORI TERISOLASI PROYEK & USER:
 ${memoryText}
@@ -130,7 +138,7 @@ ${body.previousPlanSummary ? `KONTEKS RENCANA SEBELUMNYA (UNTUK REVISI LANJUTAN)
 INSTRUKSI PENGGUNA:
 ${instruction}`;
 
-    // 3. Panggil AI Cloud dengan Fallback otomatis
+    // 3. Panggil AI Cloud
     const planResult = await generatePlanWithFallback({
       providers: (providers as DbAiProvider[]) ?? [],
       models: (models as DbAiModel[]) ?? [],
@@ -138,7 +146,7 @@ ${instruction}`;
       userPrompt,
     });
 
-    // 4. Catat usage log & simpan rencana ke memori/log aktivitas
+    // 4. Catat usage log
     await supabase.from("usage_logs").insert({
       user_id: user.id,
       project_id: projectContext?.id ?? null,
@@ -149,10 +157,56 @@ ${instruction}`;
       estimated_cost_usd: 0,
     });
 
+    // 5. Simpan langsung sebagai riwayat di workflow_runs & tasks agar tidak pernah hilang
+    const runStatus = mode === "autonomous" ? "running" : "waiting_approval";
+    const { data: savedRun } = await supabase
+      .from("workflow_runs")
+      .insert({
+        user_id: user.id,
+        project_id: projectContext?.id ?? null,
+        workflow_id: null,
+        title: instruction.slice(0, 140),
+        trigger_mode: mode,
+        status: runStatus,
+        current_step: 1,
+        total_steps: planResult.steps.length,
+      })
+      .select()
+      .single();
+
+    if (savedRun) {
+      const taskRows = planResult.steps.map((step, idx) => {
+        const initialStatus: TaskStatus =
+          mode === "autonomous" && idx === 0 ? "running" : "awaiting_approval";
+
+        return {
+          workflow_run_id: savedRun.id,
+          user_id: user.id,
+          project_id: projectContext?.id ?? null,
+          agent_code: step.agentCode || "story",
+          step_order: step.stepNumber || idx + 1,
+          title: `${step.agentName}: ${step.action.slice(0, 80)}`,
+          instruction: step.action,
+          depends_on_task_ids: [],
+          status: initialStatus,
+          input_payload: {
+            agentName: step.agentName,
+            dependsOn: step.dependsOn,
+            estimatedOutput: step.estimatedOutput,
+            intentSummary: planResult.intentSummary,
+          },
+          output_payload: {},
+        };
+      });
+
+      await supabase.from("tasks").insert(taskRows);
+    }
+
     return NextResponse.json({
       ok: true,
       planResult,
       loadedMemoryCount: memories.length,
+      savedRunId: savedRun?.id ?? null,
     });
   } catch (err) {
     return NextResponse.json(
