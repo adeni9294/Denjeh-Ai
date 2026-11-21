@@ -68,6 +68,7 @@ export interface UserProfile {
   timezone: string;
   themePreference: "dark" | "light";
 }
+
 export type MemoryScope = "user" | "project" | "agent" | "task";
 
 export interface DbProject {
@@ -96,6 +97,7 @@ export interface DbMemory {
   created_at: string;
   updated_at: string;
 }
+
 export interface DbAiProvider {
   id: string;
   user_id: string;
@@ -126,13 +128,6 @@ export interface DbAiModel {
   created_at: string;
   updated_at: string;
 }
-export type TaskStatus =
-  | "pending"
-  | "waiting_approval"
-  | "running"
-  | "completed"
-  | "failed"
-  | "skipped";
 
 export interface DbWorkflowRun {
   id: string;
