@@ -27,14 +27,14 @@ export interface NavItem {
 export const MAIN_NAV_ITEMS: NavItem[] = [
   { label: "Dashboard", href: "/", icon: LayoutDashboard, phaseReady: true },
   { label: "AI Command Center", href: "/command-center", icon: TerminalSquare, phaseReady: true },
-  { label: "Projects", href: "/#projects", icon: FolderKanban, phaseReady: false },
+  { label: "Projects", href: "/projects", icon: FolderKanban, phaseReady: true },
   { label: "Agent Studio", href: "/#agents", icon: Bot, phaseReady: false },
   { label: "Workflow Builder", href: "/#workflows", icon: GitBranch, phaseReady: false },
   { label: "Content Studio", href: "/#content-studio", icon: Sparkles, phaseReady: false },
   { label: "Content Planner", href: "/#planner", icon: CalendarDays, phaseReady: false },
   { label: "Publishing Center", href: "/#publishing", icon: Send, phaseReady: false },
   { label: "Analytics", href: "/#analytics", icon: BarChart3, phaseReady: false },
-  { label: "Memory & Settings", href: "/#settings", icon: Database, phaseReady: false },
+  { label: "Memory & Settings", href: "/projects", icon: Database, phaseReady: true },
 ];
 
 export function Sidebar() {
