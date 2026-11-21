@@ -227,9 +227,9 @@ ${instruction}`;
           project_id: projectContext?.id ?? null,
           step_order: step.stepNumber || idx + 1,
           title: `${step.agentName}: ${step.action.slice(0, 80)}`,
-          instruction: step.action,
           status: initialStatus,
           input_payload: {
+            instruction: step.action,
             agentCode: step.agentCode || "story",
             agentName: step.agentName,
             dependsOn: step.dependsOn,
