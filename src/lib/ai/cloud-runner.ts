@@ -1,4 +1,5 @@
 import { DbAiModel, DbAiProvider } from "@/types/studio";
+import { buildAgentToolInstructionBlock } from "@/lib/ai/agent-tools";
 
 export interface GeneratedPlanStep {
   stepNumber: number;
