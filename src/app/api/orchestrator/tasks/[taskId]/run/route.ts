@@ -93,6 +93,7 @@ export async function POST(
       const { data: memRows } = await supabase
         .from("memories")
         .select("*")
+        .eq("user_id", user.id)
         .or(
           `project_id.eq.${taskRow.project_id},and(scope.eq.user,project_id.is.null)`
         )
@@ -101,14 +102,28 @@ export async function POST(
       memories = (memRows as DbMemory[]) ?? [];
     }
 
-    // 3. Ambil output langkah sebelumnya dalam workflow_run yang sama
+    // 3. Ambil output langkah sebelumnya & judul run dalam workflow_run yang sama
     let priorOutputsText = "- Tidak ada output langkah sebelumnya.";
+    let rootCommandTitle = "";
+
     if (taskRow.workflow_run_id) {
-      const { data: siblingTasks } = await supabase
-        .from("tasks")
-        .select("id, title, status, input_payload, output_payload")
-        .eq("workflow_run_id", taskRow.workflow_run_id)
-        .eq("user_id", user.id);
+      const [{ data: runRow }, { data: siblingTasks }] = await Promise.all([
+        supabase
+          .from("workflow_runs")
+          .select("plan_json")
+          .eq("id", taskRow.workflow_run_id)
+          .maybeSingle(),
+        supabase
+          .from("tasks")
+          .select("id, title, status, input_payload, output_payload")
+          .eq("workflow_run_id", taskRow.workflow_run_id)
+          .eq("user_id", user.id),
+      ]);
+
+      if (runRow?.plan_json && typeof runRow.plan_json === "object") {
+        const meta = runRow.plan_json as Record<string, unknown>;
+        rootCommandTitle = String(meta.title ?? "").trim();
+      }
 
       const completedPrior = ((siblingTasks ?? []) as Record<string, unknown>[])
         .filter((t) => t.id !== taskRow.id && t.status === "completed")
@@ -125,10 +140,10 @@ export async function POST(
           .map((t) => {
             const out = (t.output_payload ?? {}) as Record<string, unknown>;
             return `- ${String(t.title ?? "Langkah")}: ${String(
-              out.summary || out.contentMarkdown || ""
-            ).slice(0, 500)}`;
+              out.contentMarkdown || out.summary || ""
+            ).slice(0, 1200)}`;
           })
-          .join("\n");
+          .join("\n\n");
       }
     }
 
@@ -145,7 +160,9 @@ export async function POST(
     const payload = (taskRow.input_payload ?? {}) as Record<string, unknown>;
     const agentCode = String(
       payload.agentCode || taskRow.agent_code || "story"
-    );
+    )
+      .toLowerCase()
+      .trim();
     const agentSpec = getAgentSpec(agentCode);
     const agentName = String(payload.agentName || agentSpec.name);
     const instruction = String(payload.instruction || taskRow.title || "");
@@ -154,12 +171,77 @@ export async function POST(
     );
     const toolInstructionBlock = buildAgentToolInstructionBlock(agentCode);
 
+    const videoMasterPromptTemplate =
+      agentCode === "video"
+        ? `
+KHUSUS VIDEO AGENT — ATURAN WAJIB MASTER PROMPT UTUH PER KLIP:
+1. Patuhi durasi setiap klip persis sesuai perintah pengguna (misalnya jika diminta 10s per klip maka setiap klip wajib 10 SECONDS; jika diminta 8s maka 8 SECONDS; jika diminta 15s maka 15 SECONDS). DILARANG mencampur durasi berbeda kecuali diminta.
+2. Buat SATU elemen di array "steps" untuk SETIAP KLIP (stepNumber = nomor klip: 1, 2, 3, dst.).
+3. Pada field "action" di setiap klip, tulis SATU MASTER PROMPT UTUH yang menyatukan cerita/adegan, lokasi, karakter & kostum, rincian aksi per rentang detik, kamera, gaya visual, sound design, dialog, kontinuitas, dan negative prompt dengan struktur blok persis seperti template berikut (dalam bahasa Inggris sinematik agar siap tempel ke video generator):
+
+TITLE: [JUDUL PROYEK / EPISODE]
+SCENE [01/02/dst]: [NAMA ADEGAN]
+DURATION: [DURASI KLIP SESUAI PERINTAH, misal 10 SECONDS]
+GENRE: [GENRE]
+STYLE: [GAYA VISUAL UTAMA]
+
+CONTINUATION FROM PREVIOUS SCENE:
+[Sambungan persis dari frame akhir klip sebelumnya, atau adegan pembuka untuk Scene 01]
+
+CHARACTER LOCK:
+[Identitas lengkap karakter utama, wajah, rambut, kostum, properti, serta kondisi fisik/luka yang harus dikunci]
+
+ENEMY / SUBJECT LOCK:
+[Identitas lawan/subjek/objek kunci lain dalam adegan atau "None" jika tidak ada]
+
+ACTION TIMELINE:
+0–2 SECONDS:
+[Detail shot, ekspresi, gerakan karakter, pencahayaan]
+
+2–4 SECONDS:
+[Detail lanjutan aksi per detik]
+
+4–6 SECONDS:
+[Detail lanjutan aksi per detik]
+
+6–8 SECONDS:
+[Detail lanjutan aksi per detik]
+
+8–10 SECONDS:
+[Detail penutup klip dan posisi akhir frame; sesuaikan rentang detik dengan durasi klip yang diminta]
+
+COMBAT / MOVEMENT STYLE:
+[Gaya koreografi, fisika gerakan, ritme aksi]
+
+SPECIAL VISUAL DETAILS:
+[Detail efek visual/teknologi/atmosfer spesifik tanpa menyalahi aturan proyek]
+
+CAMERA:
+[Jenis shot, pergerakan kamera, framing dari awal hingga akhir klip]
+
+VISUAL STYLE:
+[Detail fotorealisme, pencahayaan, tekstur lokasi, film grain]
+
+SOUND DESIGN:
+[Efek suara detail, langkah kaki, benturan, atmosfer, musik/bass]
+
+DIALOGUE:
+[Karakter/suara dan dialog singkat yang diucapkan di klip ini, atau "None"]
+
+STRICT CONTINUITY:
+[Aturan konsistensi latar, posisi karakter, properti, pencahayaan, dan larangan lompatan waktu]
+
+NEGATIVE PROMPT:
+[Daftar larangan visual/animasi/distorsi wajah/perubahan kostum]`
+        : "";
+
     const systemPrompt = `Anda adalah ${agentName} dalam sistem DENJEH AI.
 Hasilkan keluaran nyata, detail, dan siap pakai sesuai tugas agen Anda dalam format JSON murni.
 
 ${toolInstructionBlock}
+${videoMasterPromptTemplate}
 
-WAJIB kembalikan JSON valid dengan skema persis seperti ini (bahasa Indonesia):
+WAJIB kembalikan JSON valid dengan skema persis seperti ini:
 {
   "intentSummary": "Ringkasan hasil kerja agen secara jelas dalam bahasa Indonesia",
   "recommendedMode": "manual",
@@ -168,7 +250,7 @@ WAJIB kembalikan JSON valid dengan skema persis seperti ini (bahasa Indonesia):
       "stepNumber": 1,
       "agentCode": "${agentCode}",
       "agentName": "${agentName}",
-      "action": "Isi detail / konten siap pakai dari hasil kerja agen ini",
+      "action": "Isi detail / master prompt utuh siap pakai dari hasil kerja agen ini",
       "dependsOn": "${String(payload.dependsOn || "Previous Steps")}",
       "estimatedOutput": "${estimatedOutput}"
     }
@@ -188,6 +270,7 @@ WAJIB kembalikan JSON valid dengan skema persis seperti ini (bahasa Indonesia):
     const userPrompt = `PROYEK: ${projectContext?.name ?? "Tanpa Proyek Khusus"}
 DESKRIPSI PROYEK: ${projectContext?.description ?? "-"}
 INSTRUKSI SISTEM PROYEK: ${projectContext?.system_instructions ?? "-"}
+PERINTAH AWAL PENGGUNA: ${rootCommandTitle || instruction}
 
 MEMORI TERKAIT:
 ${memoryText}
@@ -209,12 +292,22 @@ ${estimatedOutput}`;
       preferredModel,
     });
 
-    const formattedStepsText = result.steps
-      .map(
-        (s) =>
-          `${s.stepNumber}. [${s.agentName}] ${s.action} (Output: ${s.estimatedOutput})`
-      )
-      .join("\n\n");
+    const formattedStepsText =
+      agentCode === "video"
+        ? result.steps
+            .map(
+              (s) =>
+                `=== CLIP #${String(s.stepNumber).padStart(2, "0")} ===\n${
+                  s.action
+                }`
+            )
+            .join("\n\n----------------------------------------\n\n")
+        : result.steps
+            .map(
+              (s) =>
+                `${s.stepNumber}. [${s.agentName}] ${s.action} (Output: ${s.estimatedOutput})`
+            )
+            .join("\n\n");
 
     const outputPayload = {
       summary: result.intentSummary || "Tugas selesai diproses.",
