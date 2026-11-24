@@ -20,6 +20,11 @@ import {
   Check,
   ArrowUpRight,
   Cpu,
+  Video,
+  Image as ImageIcon,
+  FileText,
+  CheckCircle2,
+  AlertCircle,
 } from "lucide-react";
 
 export type StudioModuleKey =
@@ -43,6 +48,7 @@ type TaskWithPayloads = DbTask & {
   workflow_run_id?: string | null;
   input_payload?: Record<string, unknown> | null;
   output_payload?: Record<string, unknown> | null;
+  checkpoint_state?: Record<string, unknown> | null;
 };
 
 type WorkflowRunWithPlan = DbWorkflowRun & {
@@ -52,6 +58,13 @@ type WorkflowRunWithPlan = DbWorkflowRun & {
 interface AgentModelPrefs {
   mode: "auto" | "manual";
   perAgent: Record<string, string>;
+}
+
+interface PublishItemState {
+  publishType: "reels" | "photo" | "text";
+  videoUrl: string;
+  photoUrl: string;
+  caption: string;
 }
 
 const STORAGE_KEY = "denjeh_agent_model_prefs";
@@ -81,7 +94,16 @@ export function StudioModulesWorkspace({
     perAgent: {},
   });
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
-  const [publishNotes, setPublishNotes] = useState<Record<string, string>>({});
+  const [publishItems, setPublishItems] = useState<
+    Record<string, PublishItemState>
+  >({});
+  const [fbPageId, setFbPageId] = useState("");
+  const [fbAccessToken, setFbAccessToken] = useState("");
+  const [hasSavedFbCreds, setHasSavedFbCreds] = useState(false);
+  const [publishingTaskId, setPublishingTaskId] = useState<string | null>(null);
+  const [publishFeedback, setPublishFeedback] = useState<
+    Record<string, { ok: boolean; message: string }>
+  >({});
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -149,17 +171,42 @@ export function StudioModulesWorkspace({
         usageQ = usageQ.eq("project_id", projectId);
       }
 
-      const [{ data: rData }, { data: tData }, { data: uData }, { data: mData }] =
-        await Promise.all([
-          runsQ,
-          tasksQ,
-          usageQ,
-          supabase.from("ai_models").select("*").eq("is_active", true),
-        ]);
+      const [
+        { data: rData },
+        { data: tData },
+        { data: uData },
+        { data: mData },
+        { data: fbCred },
+      ] = await Promise.all([
+        runsQ,
+        tasksQ,
+        usageQ,
+        supabase.from("ai_models").select("*").eq("is_active", true),
+        supabase
+          .from("memories")
+          .select("content")
+          .eq("user_id", user.id)
+          .eq("scope", "user")
+          .eq("memory_key", "fb_page_credentials")
+          .maybeSingle(),
+      ]);
 
       setRuns((rData as DbWorkflowRun[]) ?? []);
       setTasks((tData as TaskWithPayloads[]) ?? []);
       setUsageLogs((uData as UsageLogRow[]) ?? []);
+
+      if (fbCred?.content) {
+        try {
+          const parsed = JSON.parse(String(fbCred.content)) as {
+            pageId?: string;
+            accessToken?: string;
+          };
+          if (parsed.pageId) setFbPageId(parsed.pageId);
+          if (parsed.accessToken) setHasSavedFbCreds(true);
+        } catch {
+          // Abaikan JSON tidak valid
+        }
+      }
 
       const dbModelRows = (mData as DbAiModel[]) ?? [];
       if (dbModelRows.length > 0) {
@@ -226,6 +273,108 @@ export function StudioModulesWorkspace({
     }
   };
 
+  const getPublishItemState = (t: TaskWithPayloads): PublishItemState => {
+    if (publishItems[t.id]) return publishItems[t.id];
+    const out = (t.output_payload ?? {}) as Record<string, unknown>;
+    const payload = (t.input_payload ?? {}) as Record<string, unknown>;
+    const agCode = String(payload.agentCode ?? "").toLowerCase();
+    const defaultType: "reels" | "photo" | "text" =
+      agCode === "video"
+        ? "reels"
+        : agCode === "visual" || agCode === "character"
+        ? "photo"
+        : "text";
+    return {
+      publishType: defaultType,
+      videoUrl: "",
+      photoUrl: "",
+      caption: String(out.contentMarkdown || out.summary || t.title),
+    };
+  };
+
+  const updatePublishItemState = (
+    taskId: string,
+    base: PublishItemState,
+    patch: Partial<PublishItemState>
+  ) => {
+    setPublishItems((prev) => ({
+      ...prev,
+      [taskId]: { ...base, ...patch },
+    }));
+  };
+
+  const handleFacebookAutoPost = async (t: TaskWithPayloads) => {
+    if (publishingTaskId) return;
+    const item = getPublishItemState(t);
+    setPublishingTaskId(t.id);
+    setPublishFeedback((prev) => {
+      const copy = { ...prev };
+      delete copy[t.id];
+      return copy;
+    });
+
+    try {
+      const res = await fetch("/api/publish/facebook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: t.project_id || selectedProject || null,
+          taskId: t.id,
+          pageId: fbPageId,
+          accessToken: fbAccessToken,
+          publishType: item.publishType,
+          caption: item.caption,
+          videoUrl: item.videoUrl,
+          photoUrl: item.photoUrl,
+          saveCredentials: Boolean(fbPageId && fbAccessToken),
+        }),
+      });
+
+      const data = (await res.json()) as {
+        ok?: boolean;
+        postId?: string;
+        error?: string;
+      };
+
+      if (!res.ok || !data.ok) {
+        setPublishFeedback((prev) => ({
+          ...prev,
+          [t.id]: {
+            ok: false,
+            message: data.error || "Gagal mempublikasikan ke Facebook Page.",
+          },
+        }));
+        return;
+      }
+
+      if (fbPageId && fbAccessToken) {
+        setHasSavedFbCreds(true);
+      }
+
+      setPublishFeedback((prev) => ({
+        ...prev,
+        [t.id]: {
+          ok: true,
+          message: `Berhasil dipublikasikan ke Facebook Page (ID: ${data.postId})`,
+        },
+      }));
+      await loadData(selectedProject);
+    } catch (err) {
+      setPublishFeedback((prev) => ({
+        ...prev,
+        [t.id]: {
+          ok: false,
+          message:
+            err instanceof Error
+              ? err.message
+              : "Koneksi gagal saat menghubungi API Facebook.",
+        },
+      }));
+    } finally {
+      setPublishingTaskId(null);
+    }
+  };
+
   const completedTasks = tasks.filter((t) => t.status === "completed");
   const totalInputTokens = usageLogs.reduce(
     (acc, u) => acc + Number(u.input_tokens ?? 0),
@@ -275,7 +424,6 @@ export function StudioModulesWorkspace({
         </div>
       ) : moduleKey === "agents" ? (
         <div className="space-y-4">
-          {/* Mode Pemilihan Model: Otomatis vs Manual */}
           <div className="glass-panel rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-2 text-xs">
               <Cpu className="h-4 w-4 text-purple-400" />
@@ -545,70 +693,265 @@ export function StudioModulesWorkspace({
           </div>
         </div>
       ) : moduleKey === "publishing" ? (
-        <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Send className="h-5 w-5 text-purple-400" />
-              <h2 className="text-base font-semibold">
-                Publishing Center — Checklist & Draf Rilis (
-                {completedTasks.length})
-              </h2>
+        <div className="space-y-4">
+          {/* Koneksi Facebook Page API */}
+          <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div>
+                <h2 className="text-base font-semibold">
+                  Koneksi Facebook Page Graph API
+                </h2>
+                <p className="text-xs text-slate-400">
+                  Publikasikan paket 3 output (Video Reels, Foto, dan Teks
+                  Caption) langsung ke Facebook Page.
+                </p>
+              </div>
+              <Badge variant={hasSavedFbCreds ? "emerald" : "amber"}>
+                {hasSavedFbCreds ? "Token Tersimpan" : "Perlu Token Halaman"}
+              </Badge>
             </div>
-            <Badge variant="purple">Siap Kurasi Rilis</Badge>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              <div className="space-y-1">
+                <label className="text-slate-300 font-medium">
+                  Facebook Page ID
+                </label>
+                <input
+                  type="text"
+                  value={fbPageId}
+                  onChange={(e) => setFbPageId(e.target.value)}
+                  placeholder="Contoh: 123456789012345"
+                  className="w-full rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2 text-xs text-slate-100"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-slate-300 font-medium">
+                  Page Access Token{" "}
+                  {hasSavedFbCreds ? "(Kosongkan jika pakai tersimpan)" : ""}
+                </label>
+                <input
+                  type="password"
+                  value={fbAccessToken}
+                  onChange={(e) => setFbAccessToken(e.target.value)}
+                  placeholder="EAABsbCS1iHgBO..."
+                  className="w-full rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2 text-xs text-slate-100"
+                />
+              </div>
+            </div>
           </div>
 
-          <p className="text-xs text-slate-400">
-            Salin atau siapkan catatan rilis per artefak yang sudah selesai
-            sebelum dipublikasikan ke kanal tujuan.
-          </p>
+          {/* Paket 3 Output: Video Reels, Foto, Teks */}
+          <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Send className="h-5 w-5 text-purple-400" />
+                <h2 className="text-base font-semibold">
+                  Publishing Center — Paket Video Reels, Foto & Teks (
+                  {completedTasks.length})
+                </h2>
+              </div>
+              <Badge variant="purple">3 Format Output</Badge>
+            </div>
 
-          <div className="space-y-3">
-            {completedTasks.map((t) => {
-              const out = (t.output_payload ?? {}) as Record<string, unknown>;
-              const defaultText = String(
-                out.contentMarkdown || out.summary || t.title
-              );
-              const noteVal = publishNotes[t.id] ?? defaultText;
+            {completedTasks.length === 0 ? (
+              <p className="text-xs text-slate-400">
+                Belum ada tugas selesai. Jalankan agen di AI Command Center
+                untuk menyiapkan materi rilis.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {completedTasks.map((t) => {
+                  const item = getPublishItemState(t);
+                  const feedback = publishFeedback[t.id];
+                  const isPublishingThis = publishingTaskId === t.id;
+                  const publishedId = String(
+                    (t.checkpoint_state ?? {}).facebookPostId ?? ""
+                  );
 
-              return (
-                <div
-                  key={t.id}
-                  className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-3.5 space-y-2 text-xs"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-semibold">{t.title}</span>
-                    <button
-                      type="button"
-                      onClick={() => handleCopyText(t.id, noteVal)}
-                      className="inline-flex items-center gap-1 rounded-lg border border-blue-500/30 bg-blue-600/20 px-2.5 py-1 text-[11px] text-blue-300"
+                  return (
+                    <div
+                      key={t.id}
+                      className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-4 space-y-3 text-xs"
                     >
-                      {copiedKey === t.id ? (
-                        <>
-                          <Check className="h-3 w-3 text-emerald-400" />
-                          <span>Tersalin</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="h-3 w-3" />
-                          <span>Salin Draf Rilis</span>
-                        </>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="space-y-0.5">
+                          <span className="font-semibold text-sm">
+                            {t.title}
+                          </span>
+                          {publishedId && (
+                            <p className="text-[11px] text-emerald-400">
+                              Terakhir rilis ke FB Post ID: {publishedId}
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <button
+                            type="button"
+                            onClick={() => handleCopyText(t.id, item.caption)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-slate-600/40 bg-slate-800/70 px-2.5 py-1 text-[11px] text-slate-200 hover:bg-slate-700/70"
+                          >
+                            {copiedKey === t.id ? (
+                              <>
+                                <Check className="h-3 w-3 text-emerald-400" />
+                                <span>Tersalin</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="h-3 w-3 text-blue-400" />
+                                <span>Salin Caption</span>
+                              </>
+                            )}
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={isPublishingThis}
+                            onClick={() => handleFacebookAutoPost(t)}
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
+                          >
+                            <Send className="h-3 w-3" />
+                            <span>
+                              {isPublishingThis
+                                ? "Mempublikasikan..."
+                                : "Auto-Post Facebook"}
+                            </span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Pemilih Jenis Output: Video Reels / Foto / Teks */}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[11px] text-slate-400">
+                          Format Publikasi:
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updatePublishItemState(t.id, item, {
+                              publishType: "reels",
+                            })
+                          }
+                          className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-medium border ${
+                            item.publishType === "reels"
+                              ? "border-purple-500 bg-purple-600/25 text-purple-200"
+                              : "border-slate-700 bg-slate-800/60 text-slate-400"
+                          }`}
+                        >
+                          <Video className="h-3 w-3" />
+                          <span>Video Reels</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updatePublishItemState(t.id, item, {
+                              publishType: "photo",
+                            })
+                          }
+                          className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-medium border ${
+                            item.publishType === "photo"
+                              ? "border-blue-500 bg-blue-600/25 text-blue-200"
+                              : "border-slate-700 bg-slate-800/60 text-slate-400"
+                          }`}
+                        >
+                          <ImageIcon className="h-3 w-3" />
+                          <span>Foto</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updatePublishItemState(t.id, item, {
+                              publishType: "text",
+                            })
+                          }
+                          className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-medium border ${
+                            item.publishType === "text"
+                              ? "border-emerald-500 bg-emerald-600/25 text-emerald-200"
+                              : "border-slate-700 bg-slate-800/60 text-slate-400"
+                          }`}
+                        >
+                          <FileText className="h-3 w-3" />
+                          <span>Teks</span>
+                        </button>
+                      </div>
+
+                      {item.publishType === "reels" && (
+                        <div className="space-y-1">
+                          <label className="text-[11px] text-purple-300 font-medium">
+                            URL Video Reels (MP4 publik hasil render Seedance /
+                            Flow)
+                          </label>
+                          <input
+                            type="url"
+                            value={item.videoUrl}
+                            onChange={(e) =>
+                              updatePublishItemState(t.id, item, {
+                                videoUrl: e.target.value,
+                              })
+                            }
+                            placeholder="https://.../dnaverse-reels.mp4"
+                            className="w-full rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-1.5 text-xs text-slate-200"
+                          />
+                        </div>
                       )}
-                    </button>
-                  </div>
-                  <textarea
-                    rows={4}
-                    value={noteVal}
-                    onChange={(e) =>
-                      setPublishNotes((prev) => ({
-                        ...prev,
-                        [t.id]: e.target.value,
-                      }))
-                    }
-                    className="w-full resize-none rounded-lg border border-slate-700 bg-slate-950/80 p-2.5 text-xs text-slate-200"
-                  />
-                </div>
-              );
-            })}
+
+                      {item.publishType === "photo" && (
+                        <div className="space-y-1">
+                          <label className="text-[11px] text-blue-300 font-medium">
+                            URL Foto / Cover (JPG/PNG publik)
+                          </label>
+                          <input
+                            type="url"
+                            value={item.photoUrl}
+                            onChange={(e) =>
+                              updatePublishItemState(t.id, item, {
+                                photoUrl: e.target.value,
+                              })
+                            }
+                            placeholder="https://.../dnaverse-keyframe.png"
+                            className="w-full rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-1.5 text-xs text-slate-200"
+                          />
+                        </div>
+                      )}
+
+                      <div className="space-y-1">
+                        <label className="text-[11px] text-slate-400">
+                          Teks Caption / Hook / Tagar Rilis
+                        </label>
+                        <textarea
+                          rows={4}
+                          value={item.caption}
+                          onChange={(e) =>
+                            updatePublishItemState(t.id, item, {
+                              caption: e.target.value,
+                            })
+                          }
+                          className="w-full resize-none rounded-lg border border-slate-700 bg-slate-950/80 p-2.5 text-xs text-slate-200"
+                        />
+                      </div>
+
+                      {feedback && (
+                        <div
+                          className={`flex items-center gap-1.5 rounded-lg p-2 text-[11px] ${
+                            feedback.ok
+                              ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                              : "border border-rose-500/30 bg-rose-500/10 text-rose-300"
+                          }`}
+                        >
+                          {feedback.ok ? (
+                            <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                          ) : (
+                            <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                          )}
+                          <span>{feedback.message}</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       ) : (
