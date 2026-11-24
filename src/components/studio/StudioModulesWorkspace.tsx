@@ -16,6 +16,10 @@ import {
   Check,
   ArrowUpRight,
 } from "lucide-react";
+import {
+  MULTI_AGENT_SPECIALISTS,
+  AGENT_TOOL_REGISTRY,
+} from "@/lib/ai/agent-tools";
 
 export type StudioModuleKey =
   | "agents"
