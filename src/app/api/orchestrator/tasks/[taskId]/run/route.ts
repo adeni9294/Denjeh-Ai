@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { generatePlanWithFallback } from "@/lib/ai/cloud-runner";
+import {
+  buildAgentToolInstructionBlock,
+  getAgentSpec,
+} from "@/lib/ai/agent-tools";
 import { DbAiModel, DbAiProvider, DbMemory, DbProject } from "@/types/studio";
 
 export async function POST(
@@ -101,7 +105,9 @@ export async function POST(
         .sort((a, b) => {
           const aPayload = (a.input_payload ?? {}) as Record<string, unknown>;
           const bPayload = (b.input_payload ?? {}) as Record<string, unknown>;
-          return Number(aPayload.stepOrder ?? 0) - Number(bPayload.stepOrder ?? 0);
+          return (
+            Number(aPayload.stepOrder ?? 0) - Number(bPayload.stepOrder ?? 0)
+          );
         });
 
       if (completedPrior.length > 0) {
@@ -127,14 +133,21 @@ export async function POST(
     ]);
 
     const payload = (taskRow.input_payload ?? {}) as Record<string, unknown>;
-    const agentName = String(payload.agentName || "Creative Agent");
+    const agentCode = String(
+      payload.agentCode || taskRow.agent_code || "story"
+    );
+    const agentSpec = getAgentSpec(agentCode);
+    const agentName = String(payload.agentName || agentSpec.name);
     const instruction = String(payload.instruction || taskRow.title || "");
     const estimatedOutput = String(
       payload.estimatedOutput || "Artefak Kreatif Terstruktur"
     );
+    const toolInstructionBlock = buildAgentToolInstructionBlock(agentCode);
 
     const systemPrompt = `Anda adalah ${agentName} dalam sistem DENJEH AI.
 Hasilkan keluaran nyata, detail, dan siap pakai sesuai tugas agen Anda dalam format JSON murni.
+
+${toolInstructionBlock}
 
 WAJIB kembalikan JSON valid dengan skema persis seperti ini (bahasa Indonesia):
 {
@@ -143,7 +156,7 @@ WAJIB kembalikan JSON valid dengan skema persis seperti ini (bahasa Indonesia):
   "steps": [
     {
       "stepNumber": 1,
-      "agentCode": "${String(payload.agentCode || "story")}",
+      "agentCode": "${agentCode}",
       "agentName": "${agentName}",
       "action": "Isi detail / konten siap pakai dari hasil kerja agen ini",
       "dependsOn": "${String(payload.dependsOn || "Previous Steps")}",
@@ -155,7 +168,10 @@ WAJIB kembalikan JSON valid dengan skema persis seperti ini (bahasa Indonesia):
     const memoryText =
       memories.length > 0
         ? memories
-            .map((m) => `- [${m.scope.toUpperCase()}] ${m.memory_key}: ${m.content}`)
+            .map(
+              (m) =>
+                `- [${m.scope.toUpperCase()}] ${m.memory_key}: ${m.content}`
+            )
             .join("\n")
         : "- Belum ada memori tersimpan.";
 
@@ -196,6 +212,8 @@ ${estimatedOutput}`;
       steps: result.steps,
       providerUsed: result.providerUsed,
       modelUsed: result.modelUsed,
+      agentCode,
+      allowedTools: agentSpec.allowedTools,
     };
 
     const nowIso = new Date().toISOString();
@@ -221,6 +239,8 @@ ${estimatedOutput}`;
           completedAt: nowIso,
           providerUsed: result.providerUsed,
           modelUsed: result.modelUsed,
+          agentCode,
+          allowedTools: agentSpec.allowedTools,
         },
       })
       .eq("id", taskRow.id)
