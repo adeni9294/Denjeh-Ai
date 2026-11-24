@@ -28,12 +28,12 @@ export const MAIN_NAV_ITEMS: NavItem[] = [
   { label: "Dashboard", href: "/", icon: LayoutDashboard, phaseReady: true },
   { label: "AI Command Center", href: "/command-center", icon: TerminalSquare, phaseReady: true },
   { label: "Projects", href: "/projects", icon: FolderKanban, phaseReady: true },
-  { label: "Agent Studio", href: "/#agents", icon: Bot, phaseReady: false },
-  { label: "Workflow Builder", href: "/#workflows", icon: GitBranch, phaseReady: false },
-{ label: "Content Studio", href: "/content-studio", icon: Sparkles, phaseReady: true },
-  { label: "Content Planner", href: "/#planner", icon: CalendarDays, phaseReady: false },
-  { label: "Publishing Center", href: "/#publishing", icon: Send, phaseReady: false },
-  { label: "Analytics", href: "/#analytics", icon: BarChart3, phaseReady: false },
+  { label: "Agent Studio", href: "/agents", icon: Bot, phaseReady: true },
+  { label: "Workflow Builder", href: "/workflows", icon: GitBranch, phaseReady: true },
+  { label: "Content Studio", href: "/content-studio", icon: Sparkles, phaseReady: true },
+  { label: "Content Planner", href: "/planner", icon: CalendarDays, phaseReady: true },
+  { label: "Publishing Center", href: "/publishing", icon: Send, phaseReady: true },
+  { label: "Analytics", href: "/analytics", icon: BarChart3, phaseReady: true },
   { label: "Memory & Settings", href: "/memory", icon: Database, phaseReady: true },
 ];
 
