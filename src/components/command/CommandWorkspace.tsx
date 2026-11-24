@@ -51,6 +51,24 @@ type TaskWithPayloads = DbTask & {
   progress?: number | null;
 };
 
+function getPreferredModelForTask(task?: TaskWithPayloads): string | undefined {
+  try {
+    const rawPrefs = window.localStorage.getItem("denjeh_agent_model_prefs");
+    if (!rawPrefs) return undefined;
+    const parsed = JSON.parse(rawPrefs) as {
+      mode?: string;
+      perAgent?: Record<string, string>;
+    };
+    const agCode = String((task?.input_payload ?? {}).agentCode ?? "");
+    if (parsed.mode === "manual" && agCode && parsed.perAgent?.[agCode]) {
+      return parsed.perAgent[agCode];
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function getPlanMeta(run: DbWorkflowRun): Record<string, unknown> {
   const raw = (run as WorkflowRunWithPlan).plan_json;
   return raw && typeof raw === "object" ? raw : {};
@@ -454,8 +472,15 @@ export function CommandWorkspace() {
     setErrorMsg(null);
 
     try {
+      const taskObj = (dbTasks as TaskWithPayloads[]).find(
+        (item) => item.id === taskId
+      );
+      const preferredModel = getPreferredModelForTask(taskObj);
+
       const res = await fetch(`/api/orchestrator/tasks/${taskId}/run`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ preferredModel }),
       });
       const data = (await res.json()) as { ok?: boolean; error?: string };
       if (!res.ok) {
@@ -513,8 +538,11 @@ export function CommandWorkspace() {
 
       for (const task of pendingTasks) {
         setRunningTaskId(task.id);
+        const preferredModel = getPreferredModelForTask(task);
         const res = await fetch(`/api/orchestrator/tasks/${task.id}/run`, {
           method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ preferredModel }),
         });
         const resultData = (await res.json()) as {
           ok?: boolean;
@@ -841,7 +869,6 @@ export function CommandWorkspace() {
         </div>
       )}
 
-      {/* Control Bar + Tab Command / History */}
       <div className="glass-panel rounded-2xl p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2.5">
           <div className="inline-flex rounded-xl border border-slate-200 dark:border-studio-border bg-slate-100 dark:bg-studio-navy p-1">
@@ -897,7 +924,6 @@ export function CommandWorkspace() {
           </select>
         </div>
 
-        {/* Mode Switcher */}
         <div className="flex items-center gap-2">
           <span className="text-xs text-slate-500 dark:text-slate-400">
             Mode:
@@ -930,7 +956,6 @@ export function CommandWorkspace() {
       </div>
 
       {activeTab === "history" ? (
-        /* Tab History Perintah Proyek */
         <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
@@ -1035,7 +1060,6 @@ export function CommandWorkspace() {
         </div>
       ) : (
         <>
-          {/* Conversation & Execution Plan Feed */}
           <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-5 min-h-[260px] max-h-[54vh] overflow-y-auto">
             {messages.length === 0 ? (
               <div className="py-8 text-center space-y-3 max-w-xl mx-auto">
@@ -1188,7 +1212,6 @@ export function CommandWorkspace() {
             )}
           </div>
 
-          {/* Attachment Chips */}
           {attachments.length > 0 && (
             <div className="flex flex-wrap gap-2">
               {attachments.map((att, idx) => (
@@ -1209,7 +1232,6 @@ export function CommandWorkspace() {
             </div>
           )}
 
-          {/* Command Input Form */}
           <form
             onSubmit={handleSendCommand}
             className="glass-panel rounded-2xl p-3 sm:p-4 space-y-2.5"
@@ -1247,7 +1269,6 @@ export function CommandWorkspace() {
             </div>
           </form>
 
-          {/* Panel Antrean Tugas Orkestrasi (PostgreSQL) */}
           {isLoggedIn && visibleTasks.length > 0 && (
             <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
               <div className="flex items-center justify-between gap-2 flex-wrap">
