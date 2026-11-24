@@ -5,7 +5,7 @@ export type AgentToolId =
   | "extract_story_beats"
   | "validate_character_continuity"
   | "build_visual_keyframes"
-  | "split_clip_prompts_10_15s"
+  | "split_clip_prompts_per_duration"
   | "generate_social_caption_pack"
   | "audit_continuity_checklist"
   | "prepare_facebook_page_payload";
@@ -34,7 +34,7 @@ export const AGENT_TOOL_REGISTRY: Record<AgentToolId, AgentToolDefinition> = {
     name: "Decompose JSON DAG Plan",
     category: "orchestration",
     description:
-      "Memecah instruksi kreatif menjadi langkah berurutan lengkap dengan dependensi antar-agen.",
+      "Memecah instruksi kreatif menjadi langkah berurutan lengkap dengan dependensi antar-agen dan durasi klip yang konsisten.",
     runtime: "prompt_structurer",
   },
   read_project_memories: {
@@ -58,7 +58,7 @@ export const AGENT_TOOL_REGISTRY: Record<AgentToolId, AgentToolDefinition> = {
     name: "Extract 3-Act Story Beats",
     category: "creative",
     description:
-      "Menyusun struktur tiga babak dan pembagian adegan berdurasi total 60 detik.",
+      "Menyusun struktur tiga babak dan pembagian adegan sesuai total durasi serta durasi per klip yang diminta.",
     runtime: "prompt_structurer",
   },
   validate_character_continuity: {
@@ -74,15 +74,15 @@ export const AGENT_TOOL_REGISTRY: Record<AgentToolId, AgentToolDefinition> = {
     name: "Build Visual Keyframes",
     category: "creative",
     description:
-      "Menghasilkan arahan pencahayaan sinematik, komposisi kamera, dan prompt keyframe gambar.",
+      "Menghasilkan arahan pencahayaan sinematik, komposisi kamera, dan detail visual yang menyatu per klip.",
     runtime: "prompt_structurer",
   },
-  split_clip_prompts_10_15s: {
-    id: "split_clip_prompts_10_15s",
-    name: "Split Clip Prompts (10-15s)",
+  split_clip_prompts_per_duration: {
+    id: "split_clip_prompts_per_duration",
+    name: "Build Master Prompt Per Clip",
     category: "creative",
     description:
-      "Memecah storyboard menjadi prompt video per segmen 10–15 detik lengkap dengan gerakan kamera.",
+      "Menyusun 1 master prompt utuh per klip sesuai durasi yang diminta (misal 10s tiap klip), menggabungkan cerita, lokasi, karakter, aksi per detik, kamera, dan dialog.",
     runtime: "prompt_structurer",
   },
   generate_social_caption_pack: {
@@ -98,7 +98,7 @@ export const AGENT_TOOL_REGISTRY: Record<AgentToolId, AgentToolDefinition> = {
     name: "Audit Continuity Checklist",
     category: "quality",
     description:
-      "Mengaudit hasil seluruh agen terhadap system instructions dan memori proyek sebelum rilis.",
+      "Mengaudit hasil seluruh agen terhadap instruksi durasi klip, keutuhan master prompt per klip, dan memori proyek.",
     runtime: "prompt_structurer",
   },
   prepare_facebook_page_payload: {
@@ -116,7 +116,7 @@ export const MULTI_AGENT_SPECIALISTS: AgentSpecialistSpec[] = [
     code: "orchestrator",
     name: "Master Orchestrator",
     title: "Koordinator Utama & Perencana",
-    role: "Memecah instruksi, mengatur dependensi JSON DAG, dan memantau alur kerja lintas agen.",
+    role: "Memecah instruksi, mengatur dependensi JSON DAG, menjaga kepatuhan durasi klip, dan memantau alur kerja lintas agen.",
     preferredTier: "Gemini / Groq",
     allowedTools: [
       "decompose_dag_plan",
@@ -124,7 +124,7 @@ export const MULTI_AGENT_SPECIALISTS: AgentSpecialistSpec[] = [
       "save_project_memory",
     ],
     defaultPrompt:
-      "Susun rencana produksi end-to-end 60 detik untuk proyek aktif lengkap dengan dependensi antar-agen.",
+      "Susun rencana produksi end-to-end 60 detik (misalnya 6 klip masing-masing 10s) untuk proyek aktif lengkap dengan dependensi antar-agen.",
   },
   {
     code: "idea",
@@ -134,7 +134,7 @@ export const MULTI_AGENT_SPECIALISTS: AgentSpecialistSpec[] = [
     preferredTier: "Gemini 2.5 Flash (Free)",
     allowedTools: ["read_project_memories", "save_project_memory"],
     defaultPrompt:
-      "Kembangkan 3 variasi premis dan hook pembuka 5 detik pertama untuk proyek aktif.",
+      "Kembangkan 3 variasi premis dan hook pembuka beberapa detik pertama untuk proyek aktif.",
   },
   {
     code: "research",
@@ -144,13 +144,13 @@ export const MULTI_AGENT_SPECIALISTS: AgentSpecialistSpec[] = [
     preferredTier: "Llama 3.3 70B (Groq)",
     allowedTools: ["read_project_memories", "save_project_memory"],
     defaultPrompt:
-      "Susun referensi atmosfer visual, gaya sinematografi, dan tren format pendek 60 detik untuk proyek aktif.",
+      "Susun referensi atmosfer visual, gaya sinematografi, dan tren format pendek untuk proyek aktif.",
   },
   {
     code: "story",
     name: "Story Agent",
     title: "Penulis Naskah & Narasi",
-    role: "Menyusun struktur tiga babak, dialog singkat, dan alur emosional.",
+    role: "Menyusun struktur tiga babak, dialog singkat, dan pembagian adegan sesuai durasi klip yang diminta.",
     preferredTier: "Gemini 2.5 Flash (Free)",
     allowedTools: [
       "read_project_memories",
@@ -158,13 +158,13 @@ export const MULTI_AGENT_SPECIALISTS: AgentSpecialistSpec[] = [
       "save_project_memory",
     ],
     defaultPrompt:
-      "Susun sinopsis, struktur tiga babak, dan naskah dialog singkat terbagi menjadi 4-5 klip 10-15 detik.",
+      "Susun sinopsis, struktur tiga babak, dan naskah dialog singkat yang selaras dengan durasi klip yang diminta pada instruksi.",
   },
   {
     code: "character",
     name: "Character Agent",
     title: "Desain & Kontinuitas Karakter",
-    role: "Menjaga konsistensi profil karakter, kostum, dan ciri visual lintas adegan.",
+    role: "Menjaga konsistensi profil karakter, kostum, dan ciri visual lintas klip.",
     preferredTier: "Gemini 2.5 Flash (Free)",
     allowedTools: [
       "read_project_memories",
@@ -178,7 +178,7 @@ export const MULTI_AGENT_SPECIALISTS: AgentSpecialistSpec[] = [
     code: "visual",
     name: "Visual Agent",
     title: "Pengarah Visual & Prompt Gambar",
-    role: "Merancang komposisi sinematik, pencahayaan, dan prompt image generator.",
+    role: "Merancang komposisi sinematik, pencahayaan, dan arahan visual terpadu per adegan.",
     preferredTier: "Gemini 2.5 Flash (Free)",
     allowedTools: [
       "read_project_memories",
@@ -186,21 +186,21 @@ export const MULTI_AGENT_SPECIALISTS: AgentSpecialistSpec[] = [
       "build_visual_keyframes",
     ],
     defaultPrompt:
-      "Susun arahan pencahayaan sinematik, komposisi kamera, dan prompt keyframe untuk tiap adegan.",
+      "Susun arahan pencahayaan sinematik, komposisi kamera, dan elemen visual terpadu untuk tiap adegan.",
   },
   {
     code: "video",
     name: "Video Agent",
-    title: "Storyboard & Prompt Video",
-    role: "Membagi adegan menjadi klip 10–15 detik lengkap dengan gerakan kamera dan transisi.",
+    title: "Master Prompt Klip & Storyboard",
+    role: "Menyusun 1 master prompt utuh per klip sesuai durasi yang diminta, menyatukan cerita, lokasi, karakter, aksi per detik, kamera, dan dialog.",
     preferredTier: "Gemini 2.5 Flash (Free)",
     allowedTools: [
       "read_project_memories",
       "build_visual_keyframes",
-      "split_clip_prompts_10_15s",
+      "split_clip_prompts_per_duration",
     ],
     defaultPrompt:
-      "Bagi storyboard menjadi prompt video per klip 10-15 detik lengkap dengan gerakan kamera, aksi, dan pencahayaan.",
+      "Buat 1 master prompt utuh untuk setiap klip sesuai durasi yang diminta (misal 10s per klip), lengkap dengan cerita, lokasi, karakter, rincian aksi per detik, gerakan kamera, dan dialog.",
   },
   {
     code: "marketing",
@@ -216,7 +216,7 @@ export const MULTI_AGENT_SPECIALISTS: AgentSpecialistSpec[] = [
     code: "quality",
     name: "Quality Agent",
     title: "Audit Kualitas & Kontinuitas",
-    role: "Mengevaluasi output terhadap memori proyek sebelum disetujui.",
+    role: "Mengevaluasi output terhadap kepatuhan durasi klip, keutuhan master prompt, dan memori proyek sebelum disetujui.",
     preferredTier: "Gemini 2.5 Flash (Free)",
     allowedTools: [
       "read_project_memories",
@@ -224,7 +224,7 @@ export const MULTI_AGENT_SPECIALISTS: AgentSpecialistSpec[] = [
       "audit_continuity_checklist",
     ],
     defaultPrompt:
-      "Lakukan audit kualitas dan kontinuitas kostum, karakter, serta durasi klip 10-15 detik sebelum rilis.",
+      "Audit kesesuaian durasi setiap klip dengan instruksi, kelengkapan 1 master prompt utuh per klip, serta kontinuitas karakter dan kostum.",
   },
   {
     code: "publishing",
@@ -264,6 +264,6 @@ export function buildAgentToolInstructionBlock(agentCode: string): string {
     `TANGGUNG JAWAB: ${spec.role}`,
     `IZIN TOOLS AKTIF:`,
     toolsList,
-    `INSTRUKSI EKSEKUSI: Gunakan kapabilitas dari izin tools di atas untuk menyusun keluaran terstruktur, spesifik, dan konsisten dengan memori proyek.`,
+    `INSTRUKSI EKSEKUSI: Patuhi durasi per klip yang diminta pengguna secara konsisten pada setiap klip (jangan mengubah atau mencampur durasi berbeda kecuali diminta). Untuk setiap klip, satukan cerita/adegan, lokasi, karakter/kostum, aksi per detik, kamera/pencahayaan, dan dialog ke dalam 1 master prompt utuh.`,
   ].join("\n");
 }
