@@ -25,6 +25,7 @@ import {
   FileText,
   CheckCircle2,
   AlertCircle,
+  Zap,
 } from "lucide-react";
 
 export type StudioModuleKey =
@@ -65,6 +66,7 @@ interface PublishItemState {
   videoUrl: string;
   photoUrl: string;
   caption: string;
+  autoPublishOnRender: boolean;
 }
 
 const STORAGE_KEY = "denjeh_agent_model_prefs";
@@ -361,18 +363,29 @@ export function StudioModulesWorkspace({
     if (publishItems[t.id]) return publishItems[t.id];
     const out = (t.output_payload ?? {}) as Record<string, unknown>;
     const payload = (t.input_payload ?? {}) as Record<string, unknown>;
+    const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
     const agCode = String(payload.agentCode ?? "").toLowerCase();
-    const defaultType: "reels" | "photo" | "text" =
+    const fallbackType: "reels" | "photo" | "text" =
       agCode === "video"
         ? "reels"
         : agCode === "visual" || agCode === "character"
         ? "photo"
         : "text";
+    const cpType =
+      cp.publishType === "reels" ||
+      cp.publishType === "photo" ||
+      cp.publishType === "text"
+        ? cp.publishType
+        : fallbackType;
+
     return {
-      publishType: defaultType,
-      videoUrl: "",
-      photoUrl: "",
-      caption: String(out.contentMarkdown || out.summary || t.title),
+      publishType: cpType,
+      videoUrl: String(cp.videoUrl ?? ""),
+      photoUrl: String(cp.photoUrl ?? ""),
+      caption: String(
+        cp.caption || out.contentMarkdown || out.summary || t.title
+      ),
+      autoPublishOnRender: Boolean(cp.autoPublishFacebook),
     };
   };
 
@@ -385,6 +398,48 @@ export function StudioModulesWorkspace({
       ...prev,
       [taskId]: { ...base, ...patch },
     }));
+  };
+
+  const handleToggleAutoPublishOnRender = async (
+    t: TaskWithPayloads,
+    item: PublishItemState
+  ) => {
+    const nextAuto = !item.autoPublishOnRender;
+    updatePublishItemState(t.id, item, { autoPublishOnRender: nextAuto });
+
+    try {
+      const supabase = createSupabaseBrowserClient();
+      const prevCp =
+        t.checkpoint_state && typeof t.checkpoint_state === "object"
+          ? (t.checkpoint_state as Record<string, unknown>)
+          : {};
+
+      await supabase
+        .from("tasks")
+        .update({
+          checkpoint_state: {
+            ...prevCp,
+            autoPublishFacebook: nextAuto,
+            publishType: item.publishType,
+            videoUrl: item.videoUrl,
+            photoUrl: item.photoUrl,
+            caption: item.caption,
+          },
+        })
+        .eq("id", t.id);
+
+      setPublishFeedback((prev) => ({
+        ...prev,
+        [t.id]: {
+          ok: true,
+          message: nextAuto
+            ? "Auto-Publish saat Render Selesai aktif. Kirim hasil render ke /api/render/callback untuk posting otomatis."
+            : "Auto-Publish saat Render Selesai dinonaktifkan.",
+        },
+      }));
+    } catch {
+      // Abaikan error pembaruan sakelar
+    }
   };
 
   const handleFacebookAutoPost = async (t: TaskWithPayloads) => {
@@ -787,7 +842,8 @@ export function StudioModulesWorkspace({
                 </h2>
                 <p className="text-xs text-slate-400">
                   Publikasikan paket 3 output (Video Reels, Foto, dan Teks
-                  Caption) langsung ke Facebook Page.
+                  Caption) langsung ke Facebook Page atau otomatis saat hasil
+                  render masuk ke <code className="text-blue-300">/api/render/callback</code>.
                 </p>
               </div>
               <Badge variant={hasSavedFbCreds ? "emerald" : "amber"}>
@@ -886,9 +942,9 @@ export function StudioModulesWorkspace({
                   const item = getPublishItemState(t);
                   const feedback = publishFeedback[t.id];
                   const isPublishingThis = publishingTaskId === t.id;
-                  const publishedId = String(
-                    (t.checkpoint_state ?? {}).facebookPostId ?? ""
-                  );
+                  const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
+                  const publishedId = String(cp.facebookPostId ?? "");
+                  const renderStatus = String(cp.renderStatus ?? "");
 
                   return (
                     <div
@@ -896,10 +952,38 @@ export function StudioModulesWorkspace({
                       className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-4 space-y-3 text-xs"
                     >
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="space-y-0.5">
-                          <span className="font-semibold text-sm">
-                            {t.title}
-                          </span>
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-semibold text-sm">
+                              {t.title}
+                            </span>
+                            {renderStatus === "completed" && (
+                              <Badge variant="emerald">Render Selesai</Badge>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2 flex-wrap text-[11px] text-slate-400">
+                            <span>Task ID:</span>
+                            <code className="rounded bg-slate-800 px-1.5 py-0.5 text-slate-200">
+                              {t.id}
+                            </code>
+                            <button
+                              type="button"
+                              onClick={() => handleCopyText(`id-${t.id}`, t.id)}
+                              className="inline-flex items-center gap-1 text-blue-400 hover:underline"
+                            >
+                              {copiedKey === `id-${t.id}` ? (
+                                <>
+                                  <Check className="h-3 w-3 text-emerald-400" />
+                                  <span>ID Tersalin</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="h-3 w-3" />
+                                  <span>Salin Task ID</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
                           {publishedId && (
                             <p className="text-[11px] text-emerald-400">
                               Terakhir rilis ke FB Post ID: {publishedId}
@@ -908,6 +992,25 @@ export function StudioModulesWorkspace({
                         </div>
 
                         <div className="flex items-center gap-1.5 flex-wrap">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleToggleAutoPublishOnRender(t, item)
+                            }
+                            className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-medium transition ${
+                              item.autoPublishOnRender
+                                ? "border-amber-500/50 bg-amber-500/20 text-amber-200"
+                                : "border-slate-700 bg-slate-800/70 text-slate-400 hover:text-slate-200"
+                            }`}
+                          >
+                            <Zap className="h-3 w-3" />
+                            <span>
+                              {item.autoPublishOnRender
+                                ? "Auto-Render→FB: ON"
+                                : "Auto-Render→FB: OFF"}
+                            </span>
+                          </button>
+
                           <button
                             type="button"
                             onClick={() => handleCopyText(t.id, item.caption)}
