@@ -100,6 +100,11 @@ export function StudioModulesWorkspace({
   const [fbPageId, setFbPageId] = useState("");
   const [fbAccessToken, setFbAccessToken] = useState("");
   const [hasSavedFbCreds, setHasSavedFbCreds] = useState(false);
+  const [savingFbCreds, setSavingFbCreds] = useState(false);
+  const [fbCredFeedback, setFbCredFeedback] = useState<{
+    ok: boolean;
+    message: string;
+  } | null>(null);
   const [publishingTaskId, setPublishingTaskId] = useState<string | null>(null);
   const [publishFeedback, setPublishFeedback] = useState<
     Record<string, { ok: boolean; message: string }>
@@ -273,6 +278,85 @@ export function StudioModulesWorkspace({
     }
   };
 
+  const handleSaveFbCredentials = async () => {
+    if (savingFbCreds) return;
+    setSavingFbCreds(true);
+    setFbCredFeedback(null);
+    try {
+      const res = await fetch("/api/publish/facebook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "save_credentials",
+          pageId: fbPageId,
+          accessToken: fbAccessToken,
+        }),
+      });
+      const data = (await res.json()) as {
+        ok?: boolean;
+        message?: string;
+        error?: string;
+      };
+      if (!res.ok || !data.ok) {
+        setFbCredFeedback({
+          ok: false,
+          message: data.error || "Gagal menyimpan kredensial Facebook Page.",
+        });
+        return;
+      }
+      setHasSavedFbCreds(true);
+      setFbAccessToken("");
+      setFbCredFeedback({
+        ok: true,
+        message: data.message || "Kredensial Facebook Page tersimpan.",
+      });
+    } catch (err) {
+      setFbCredFeedback({
+        ok: false,
+        message:
+          err instanceof Error
+            ? err.message
+            : "Gagal menghubungi server saat menyimpan kredensial.",
+      });
+    } finally {
+      setSavingFbCreds(false);
+    }
+  };
+
+  const handleClearFbCredentials = async () => {
+    if (savingFbCreds) return;
+    setSavingFbCreds(true);
+    setFbCredFeedback(null);
+    try {
+      const res = await fetch("/api/publish/facebook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "clear_credentials" }),
+      });
+      const data = (await res.json()) as {
+        ok?: boolean;
+        message?: string;
+        error?: string;
+      };
+      if (!res.ok || !data.ok) {
+        setFbCredFeedback({
+          ok: false,
+          message: data.error || "Gagal menghapus kredensial.",
+        });
+        return;
+      }
+      setFbPageId("");
+      setFbAccessToken("");
+      setHasSavedFbCreds(false);
+      setFbCredFeedback({
+        ok: true,
+        message: data.message || "Kredensial dihapus.",
+      });
+    } finally {
+      setSavingFbCreds(false);
+    }
+  };
+
   const getPublishItemState = (t: TaskWithPayloads): PublishItemState => {
     if (publishItems[t.id]) return publishItems[t.id];
     const out = (t.output_payload ?? {}) as Record<string, unknown>;
@@ -349,6 +433,7 @@ export function StudioModulesWorkspace({
 
       if (fbPageId && fbAccessToken) {
         setHasSavedFbCreds(true);
+        setFbAccessToken("");
       }
 
       setPublishFeedback((prev) => ({
@@ -694,7 +779,6 @@ export function StudioModulesWorkspace({
         </div>
       ) : moduleKey === "publishing" ? (
         <div className="space-y-4">
-          {/* Koneksi Facebook Page API */}
           <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
             <div className="flex items-center justify-between flex-wrap gap-2">
               <div>
@@ -739,9 +823,46 @@ export function StudioModulesWorkspace({
                 />
               </div>
             </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              {hasSavedFbCreds && (
+                <button
+                  type="button"
+                  disabled={savingFbCreds}
+                  onClick={handleClearFbCredentials}
+                  className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs font-medium text-rose-300 hover:bg-rose-500/20 disabled:opacity-50"
+                >
+                  Hapus Kredensial
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={savingFbCreds}
+                onClick={handleSaveFbCredentials}
+                className="rounded-xl bg-emerald-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
+              >
+                {savingFbCreds ? "Menyimpan..." : "Simpan Kredensial"}
+              </button>
+            </div>
+
+            {fbCredFeedback && (
+              <div
+                className={`flex items-center gap-1.5 rounded-lg p-2 text-[11px] ${
+                  fbCredFeedback.ok
+                    ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                    : "border border-rose-500/30 bg-rose-500/10 text-rose-300"
+                }`}
+              >
+                {fbCredFeedback.ok ? (
+                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                )}
+                <span>{fbCredFeedback.message}</span>
+              </div>
+            )}
           </div>
 
-          {/* Paket 3 Output: Video Reels, Foto, Teks */}
           <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -821,7 +942,6 @@ export function StudioModulesWorkspace({
                         </div>
                       </div>
 
-                      {/* Pemilih Jenis Output: Video Reels / Foto / Teks */}
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-[11px] text-slate-400">
                           Format Publikasi:
