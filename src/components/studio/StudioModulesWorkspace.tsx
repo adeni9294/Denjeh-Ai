@@ -3,7 +3,11 @@
 import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
-import { DbProject, DbTask, DbWorkflowRun } from "@/types/studio";
+import { DbAiModel, DbProject, DbTask, DbWorkflowRun } from "@/types/studio";
+import {
+  MULTI_AGENT_SPECIALISTS,
+  AGENT_TOOL_REGISTRY,
+} from "@/lib/ai/agent-tools";
 import { Badge } from "@/components/ui/Badge";
 import {
   Bot,
@@ -15,11 +19,8 @@ import {
   Copy,
   Check,
   ArrowUpRight,
+  Cpu,
 } from "lucide-react";
-import {
-  MULTI_AGENT_SPECIALISTS,
-  AGENT_TOOL_REGISTRY,
-} from "@/lib/ai/agent-tools";
 
 export type StudioModuleKey =
   | "agents"
@@ -48,42 +49,18 @@ type WorkflowRunWithPlan = DbWorkflowRun & {
   plan_json?: Record<string, unknown> | null;
 };
 
-const AGENT_ROSTER = [
-  {
-    code: "story",
-    name: "Story Agent",
-    role: "Menyusun sinopsis, struktur tiga babak, dan naskah dialog/klip 10–15 detik.",
-    defaultPrompt:
-      "Buat sinopsis, struktur tiga babak, dan naskah dialog singkat terbagi menjadi klip 10-15 detik untuk proyek aktif.",
-  },
-  {
-    code: "character",
-    name: "Character Agent",
-    role: "Menjaga identitas tokoh, kostum, properti, dan konsistensi karakter lintas adegan.",
-    defaultPrompt:
-      "Susun profil karakter utama dan pendukung lengkap dengan kostum, properti kunci, dan aturan kontinuitas visual.",
-  },
-  {
-    code: "visual",
-    name: "Visual & Video Prompt Agent",
-    role: "Menyusun storyboard, arahan pencahayaan sinematik, dan prompt video per klip 10–15 detik.",
-    defaultPrompt:
-      "Buat storyboard dan prompt video sinematik per klip berdurasi 10-15 detik lengkap dengan kamera dan pencahayaan.",
-  },
-  {
-    code: "publishing",
-    name: "Publishing & Social Agent",
-    role: "Menyiapkan caption multi-platform, tagar, metadata, dan jadwal publikasi.",
-    defaultPrompt:
-      "Susun caption media sosial, tagar, judul, dan rekomendasi jadwal rilis untuk klip proyek aktif.",
-  },
-  {
-    code: "quality",
-    name: "Quality Agent",
-    role: "Mengaudit konsistensi cerita, kostum, visual, durasi, dan kesiapan rilis akhir.",
-    defaultPrompt:
-      "Lakukan audit kualitas menyeluruh terhadap konsistensi cerita, kostum, visual, dan durasi sebelum rilis.",
-  },
+interface AgentModelPrefs {
+  mode: "auto" | "manual";
+  perAgent: Record<string, string>;
+}
+
+const STORAGE_KEY = "denjeh_agent_model_prefs";
+
+const FALLBACK_MODEL_OPTIONS = [
+  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash (Free)" },
+  { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite (Free)" },
+  { id: "llama-3.3-70b-versatile", label: "Llama 3.3 70B Versatile (Groq)" },
+  { id: "llama-3.1-8b-instant", label: "Llama 3.1 8B Instant (Groq)" },
 ];
 
 export function StudioModulesWorkspace({
@@ -96,9 +73,42 @@ export function StudioModulesWorkspace({
   const [runs, setRuns] = useState<DbWorkflowRun[]>([]);
   const [tasks, setTasks] = useState<TaskWithPayloads[]>([]);
   const [usageLogs, setUsageLogs] = useState<UsageLogRow[]>([]);
+  const [availableModels, setAvailableModels] = useState<
+    { id: string; label: string }[]
+  >(FALLBACK_MODEL_OPTIONS);
+  const [modelPrefs, setModelPrefs] = useState<AgentModelPrefs>({
+    mode: "auto",
+    perAgent: {},
+  });
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [publishNotes, setPublishNotes] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as AgentModelPrefs;
+        if (parsed && (parsed.mode === "auto" || parsed.mode === "manual")) {
+          setModelPrefs({
+            mode: parsed.mode,
+            perAgent: parsed.perAgent ?? {},
+          });
+        }
+      }
+    } catch {
+      // Abaikan error localStorage
+    }
+  }, []);
+
+  const updateModelPrefs = (next: AgentModelPrefs) => {
+    setModelPrefs(next);
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // Abaikan error localStorage
+    }
+  };
 
   const loadData = useCallback(async (projectId: string) => {
     setLoading(true);
@@ -139,12 +149,33 @@ export function StudioModulesWorkspace({
         usageQ = usageQ.eq("project_id", projectId);
       }
 
-      const [{ data: rData }, { data: tData }, { data: uData }] =
-        await Promise.all([runsQ, tasksQ, usageQ]);
+      const [{ data: rData }, { data: tData }, { data: uData }, { data: mData }] =
+        await Promise.all([
+          runsQ,
+          tasksQ,
+          usageQ,
+          supabase.from("ai_models").select("*").eq("is_active", true),
+        ]);
 
       setRuns((rData as DbWorkflowRun[]) ?? []);
       setTasks((tData as TaskWithPayloads[]) ?? []);
       setUsageLogs((uData as UsageLogRow[]) ?? []);
+
+      const dbModelRows = (mData as DbAiModel[]) ?? [];
+      if (dbModelRows.length > 0) {
+        const mapped = Array.from(
+          new Map(
+            dbModelRows.map((m) => [
+              m.model_identifier,
+              {
+                id: m.model_identifier,
+                label: m.display_name || m.model_identifier,
+              },
+            ])
+          ).values()
+        );
+        setAvailableModels(mapped);
+      }
     } finally {
       setLoading(false);
     }
@@ -186,7 +217,10 @@ export function StudioModulesWorkspace({
     try {
       await navigator.clipboard.writeText(text);
       setCopiedKey(key);
-      setTimeout(() => setCopiedKey((prev) => (prev === key ? null : prev)), 2000);
+      setTimeout(
+        () => setCopiedKey((prev) => (prev === key ? null : prev)),
+        2000
+      );
     } catch {
       // Abaikan error clipboard
     }
@@ -239,75 +273,172 @@ export function StudioModulesWorkspace({
         <div className="glass-panel rounded-2xl p-6 text-xs text-slate-400">
           Memuat data modul...
         </div>
-     ) : moduleKey === "agents" ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {MULTI_AGENT_SPECIALISTS.map((ag) => (
-            <div
-              key={ag.code}
-              className="glass-panel rounded-2xl p-4 space-y-2.5 text-xs"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <div className="flex items-center gap-2 font-semibold text-sm">
-                    <Bot className="h-4 w-4 text-purple-400" />
-                    <span>{ag.name}</span>
-                  </div>
-                  <p className="text-[11px] text-blue-300 mt-0.5">{ag.title}</p>
-                </div>
-                <Badge variant="purple">{ag.preferredTier}</Badge>
-              </div>
-
-              <p className="text-slate-300 leading-relaxed">{ag.role}</p>
-
-              <div className="space-y-1">
-                <p className="text-[11px] font-medium text-slate-400">
-                  Izin Tools ({ag.allowedTools.length}):
+      ) : moduleKey === "agents" ? (
+        <div className="space-y-4">
+          {/* Mode Pemilihan Model: Otomatis vs Manual */}
+          <div className="glass-panel rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-xs">
+              <Cpu className="h-4 w-4 text-purple-400" />
+              <div>
+                <p className="font-semibold text-slate-100">
+                  Mode Pemilihan Model AI
                 </p>
-                <div className="flex flex-wrap gap-1.5">
-                  {ag.allowedTools.map((toolId) => {
-                    const toolDef = AGENT_TOOL_REGISTRY[toolId];
-                    return (
-                      <span
-                        key={toolId}
-                        title={toolDef.description}
-                        className="rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-[10px] font-medium text-blue-300"
-                      >
-                        {toolDef.name}
-                      </span>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between pt-1.5 border-t border-slate-800">
-                <button
-                  type="button"
-                  onClick={() => handleCopyText(ag.code, ag.defaultPrompt)}
-                  className="inline-flex items-center gap-1 rounded-lg border border-slate-600/40 bg-slate-800/70 px-2.5 py-1 text-[11px] text-slate-200 hover:bg-slate-700/70"
-                >
-                  {copiedKey === ag.code ? (
-                    <>
-                      <Check className="h-3 w-3 text-emerald-400" />
-                      <span>Prompt Tersalin</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="h-3 w-3 text-blue-400" />
-                      <span>Salin Prompt Tugas</span>
-                    </>
-                  )}
-                </button>
-                <Link
-                  href={`/command-center?q=${encodeURIComponent(
-                    ag.defaultPrompt
-                  )}`}
-                  className="text-[11px] font-medium text-blue-400 hover:underline"
-                >
-                  Kirim ke Command Center →
-                </Link>
+                <p className="text-[11px] text-slate-400">
+                  {modelPrefs.mode === "auto"
+                    ? "Otomatis mengikuti urutan prioritas & fallback di Memory & Settings."
+                    : "Manual: pilih model spesifik untuk masing-masing agen di bawah."}
+                </p>
               </div>
             </div>
-          ))}
+
+            <div className="inline-flex rounded-xl border border-slate-700 bg-slate-900/80 p-1">
+              <button
+                type="button"
+                onClick={() =>
+                  updateModelPrefs({ ...modelPrefs, mode: "auto" })
+                }
+                className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                  modelPrefs.mode === "auto"
+                    ? "bg-emerald-600 text-white"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                Otomatis (Fallback)
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  updateModelPrefs({ ...modelPrefs, mode: "manual" })
+                }
+                className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                  modelPrefs.mode === "manual"
+                    ? "bg-purple-600 text-white"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                Manual per Agen
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {MULTI_AGENT_SPECIALISTS.map((ag) => {
+              const selectedModelId =
+                modelPrefs.perAgent[ag.code] || availableModels[0]?.id || "";
+              const commandHref =
+                modelPrefs.mode === "manual" && selectedModelId
+                  ? `/command-center?q=${encodeURIComponent(
+                      ag.defaultPrompt
+                    )}&agent=${encodeURIComponent(
+                      ag.code
+                    )}&model=${encodeURIComponent(selectedModelId)}`
+                  : `/command-center?q=${encodeURIComponent(
+                      ag.defaultPrompt
+                    )}&agent=${encodeURIComponent(ag.code)}`;
+
+              return (
+                <div
+                  key={ag.code}
+                  className="glass-panel rounded-2xl p-4 space-y-2.5 text-xs"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <div className="flex items-center gap-2 font-semibold text-sm">
+                        <Bot className="h-4 w-4 text-purple-400" />
+                        <span>{ag.name}</span>
+                      </div>
+                      <p className="text-[11px] text-blue-300 mt-0.5">
+                        {ag.title}
+                      </p>
+                    </div>
+                    <Badge
+                      variant={modelPrefs.mode === "manual" ? "blue" : "purple"}
+                    >
+                      {modelPrefs.mode === "manual"
+                        ? selectedModelId
+                        : ag.preferredTier}
+                    </Badge>
+                  </div>
+
+                  <p className="text-slate-300 leading-relaxed">{ag.role}</p>
+
+                  {modelPrefs.mode === "manual" && (
+                    <div className="rounded-xl border border-purple-500/30 bg-purple-500/5 p-2.5 flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-purple-200 font-medium">
+                        Model Agen:
+                      </span>
+                      <select
+                        value={selectedModelId}
+                        onChange={(e) =>
+                          updateModelPrefs({
+                            ...modelPrefs,
+                            perAgent: {
+                              ...modelPrefs.perAgent,
+                              [ag.code]: e.target.value,
+                            },
+                          })
+                        }
+                        aria-label={`Pilih model untuk ${ag.name}`}
+                        className="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] text-slate-100"
+                      >
+                        {availableModels.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  <div className="space-y-1">
+                    <p className="text-[11px] font-medium text-slate-400">
+                      Izin Tools ({ag.allowedTools.length}):
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {ag.allowedTools.map((toolId) => {
+                        const toolDef = AGENT_TOOL_REGISTRY[toolId];
+                        return (
+                          <span
+                            key={toolId}
+                            title={toolDef.description}
+                            className="rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-[10px] font-medium text-blue-300"
+                          >
+                            {toolDef.name}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-1.5 border-t border-slate-800">
+                    <button
+                      type="button"
+                      onClick={() => handleCopyText(ag.code, ag.defaultPrompt)}
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-600/40 bg-slate-800/70 px-2.5 py-1 text-[11px] text-slate-200 hover:bg-slate-700/70"
+                    >
+                      {copiedKey === ag.code ? (
+                        <>
+                          <Check className="h-3 w-3 text-emerald-400" />
+                          <span>Prompt Tersalin</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-3 w-3 text-blue-400" />
+                          <span>Salin Prompt Tugas</span>
+                        </>
+                      )}
+                    </button>
+                    <Link
+                      href={commandHref}
+                      className="text-[11px] font-medium text-blue-400 hover:underline"
+                    >
+                      Kirim ke Command Center →
+                    </Link>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       ) : moduleKey === "workflows" ? (
         <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
@@ -339,7 +470,9 @@ export function StudioModulesWorkspace({
                   >
                     <div className="flex items-center justify-between gap-2">
                       <span className="font-semibold">
-                        {String(meta.title || r.title || `Run #${r.id.slice(0, 8)}`)}
+                        {String(
+                          meta.title || r.title || `Run #${r.id.slice(0, 8)}`
+                        )}
                       </span>
                       <Badge
                         variant={r.status === "completed" ? "emerald" : "amber"}
@@ -417,7 +550,8 @@ export function StudioModulesWorkspace({
             <div className="flex items-center gap-2">
               <Send className="h-5 w-5 text-purple-400" />
               <h2 className="text-base font-semibold">
-                Publishing Center — Checklist & Draf Rilis ({completedTasks.length})
+                Publishing Center — Checklist & Draf Rilis (
+                {completedTasks.length})
               </h2>
             </div>
             <Badge variant="purple">Siap Kurasi Rilis</Badge>
@@ -478,7 +612,6 @@ export function StudioModulesWorkspace({
           </div>
         </div>
       ) : (
-        /* Analytics */
         <div className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="glass-panel rounded-2xl p-4">
