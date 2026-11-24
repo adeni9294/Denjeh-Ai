@@ -14,6 +14,7 @@ import {
   BookmarkPlus,
   AlertCircle,
   Layers,
+  Film,
   FileText,
 } from "lucide-react";
 
@@ -28,14 +29,24 @@ type WorkflowRunWithPlan = DbWorkflowRun & {
   plan_json?: Record<string, unknown> | null;
 };
 
-function getOutputBody(task: TaskWithPayloads): string {
+function getAgentCode(task: TaskWithPayloads): string {
+  const payload = (task.input_payload ?? {}) as Record<string, unknown>;
+  const out = (task.output_payload ?? {}) as Record<string, unknown>;
+  return String(
+    payload.agentCode || out.agentCode || task.agent_code || ""
+  )
+    .toLowerCase()
+    .trim();
+}
+
+function getPromptBody(task: TaskWithPayloads): string {
   const out = (task.output_payload ?? {}) as Record<string, unknown>;
   const summary = String(out.summary ?? "").trim();
   const contentMarkdown = String(out.contentMarkdown ?? "").trim();
-  if (summary && contentMarkdown) {
+  if (contentMarkdown && summary && contentMarkdown !== summary) {
     return `${summary}\n\n${contentMarkdown}`;
   }
-  return summary || contentMarkdown || task.title;
+  return contentMarkdown || summary || task.title;
 }
 
 function downloadMdFile(filename: string, markdown: string) {
@@ -56,7 +67,9 @@ export function ContentStudioWorkspace() {
   const [runs, setRuns] = useState<DbWorkflowRun[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string>("all");
   const [tasks, setTasks] = useState<TaskWithPayloads[]>([]);
-  const [agentFilter, setAgentFilter] = useState<string>("all");
+  const [promptCategory, setPromptCategory] = useState<
+    "all" | "clip_master" | "creative_prompt"
+  >("all");
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [savingMemId, setSavingMemId] = useState<string | null>(null);
   const [savedMemIds, setSavedMemIds] = useState<Record<string, boolean>>({});
@@ -102,8 +115,10 @@ export function ContentStudioWorkspace() {
         tasksQuery = tasksQuery.eq("project_id", projectId);
       }
 
-      const [{ data: runsData, error: runsErr }, { data: tasksData, error: tasksErr }] =
-        await Promise.all([runsQuery, tasksQuery]);
+      const [
+        { data: runsData, error: runsErr },
+        { data: tasksData, error: tasksErr },
+      ] = await Promise.all([runsQuery, tasksQuery]);
 
       if (runsErr) {
         setErrorMsg(runsErr.message);
@@ -127,7 +142,7 @@ export function ContentStudioWorkspace() {
       setRuns((runsData as DbWorkflowRun[]) ?? []);
       setTasks(sortedTasks);
       setSelectedRunId("all");
-      setAgentFilter("all");
+      setPromptCategory("all");
     } catch (err) {
       setErrorMsg(
         err instanceof Error ? err.message : "Gagal memuat data Content Studio."
@@ -181,48 +196,53 @@ export function ContentStudioWorkspace() {
     }
   }, [selectedProject, isLoggedIn, loadStudioData]);
 
-  const agentOptions = Array.from(
-    new Set(
-      tasks.map((t) => {
-        const payload = (t.input_payload ?? {}) as Record<string, unknown>;
-        return String(payload.agentName || payload.agentCode || "Agent");
-      })
-    )
-  );
+  // Content Studio hanya menyaring blok prompt (mengecualikan agen distribusi/publikasi/audit non-prompt)
+  const promptOnlyTasks = tasks.filter((t) => {
+    const code = getAgentCode(t);
+    return !["marketing", "publishing", "quality"].includes(code);
+  });
 
-  const filteredArtifacts = tasks.filter((t) => {
+  const clipMasterCount = promptOnlyTasks.filter(
+    (t) => getAgentCode(t) === "video"
+  ).length;
+
+  const creativePromptCount = promptOnlyTasks.filter(
+    (t) => getAgentCode(t) !== "video"
+  ).length;
+
+  const filteredPrompts = promptOnlyTasks.filter((t) => {
     if (selectedRunId !== "all" && t.workflow_run_id !== selectedRunId) {
       return false;
     }
-    if (agentFilter !== "all") {
-      const payload = (t.input_payload ?? {}) as Record<string, unknown>;
-      const label = String(payload.agentName || payload.agentCode || "Agent");
-      if (label !== agentFilter) return false;
+    const code = getAgentCode(t);
+    if (promptCategory === "clip_master" && code !== "video") {
+      return false;
+    }
+    if (promptCategory === "creative_prompt" && code === "video") {
+      return false;
     }
     return true;
   });
 
   const handleCopy = async (task: TaskWithPayloads) => {
     try {
-      await navigator.clipboard.writeText(getOutputBody(task));
+      await navigator.clipboard.writeText(getPromptBody(task));
       setCopiedId(task.id);
       setTimeout(() => {
         setCopiedId((prev) => (prev === task.id ? null : prev));
       }, 2000);
     } catch {
-      setErrorMsg("Gagal menyalin artefak ke clipboard.");
+      setErrorMsg("Gagal menyalin prompt ke clipboard.");
     }
   };
 
   const handleDownloadOne = (task: TaskWithPayloads) => {
     const payload = (task.input_payload ?? {}) as Record<string, unknown>;
     const stepOrder = Number(payload.stepOrder ?? task.step_order ?? 1);
-    const agentCode = String(payload.agentCode ?? "artifact")
-      .toLowerCase()
-      .replace(/[^a-z0-9-_]+/g, "-");
+    const code = getAgentCode(task) || "prompt";
     downloadMdFile(
-      `step-${stepOrder}-${agentCode}.md`,
-      `# ${task.title}\n\n${getOutputBody(task)}\n`
+      `step-${stepOrder}-${code}-master-prompt.md`,
+      `# ${task.title}\n\n${getPromptBody(task)}\n`
     );
   };
 
@@ -240,16 +260,17 @@ export function ContentStudioWorkspace() {
 
       const payload = (task.input_payload ?? {}) as Record<string, unknown>;
       const stepOrder = Number(payload.stepOrder ?? task.step_order ?? 1);
-      const agentCode = String(payload.agentCode ?? "agent")
-        .toLowerCase()
-        .replace(/[^a-z0-9-_]+/g, "_");
+      const code = (getAgentCode(task) || "prompt").replace(
+        /[^a-z0-9-_]+/g,
+        "_"
+      );
 
       const { error } = await supabase.from("memories").insert({
         user_id: user.id,
         project_id: task.project_id || selectedProject || null,
         scope: "project",
-        memory_key: `studio_${stepOrder}_${agentCode}_${task.id.slice(0, 6)}`,
-        content: getOutputBody(task).slice(0, 3500),
+        memory_key: `prompt_${stepOrder}_${code}_${task.id.slice(0, 6)}`,
+        content: getPromptBody(task).slice(0, 3500),
         importance: 8,
       });
 
@@ -261,7 +282,7 @@ export function ContentStudioWorkspace() {
       setSavedMemIds((prev) => ({ ...prev, [task.id]: true }));
     } catch (err) {
       setErrorMsg(
-        err instanceof Error ? err.message : "Gagal menyimpan ke memori."
+        err instanceof Error ? err.message : "Gagal menyimpan prompt ke memori."
       );
     } finally {
       setSavingMemId(null);
@@ -269,18 +290,20 @@ export function ContentStudioWorkspace() {
   };
 
   const handleExportCompilation = () => {
-    if (filteredArtifacts.length === 0) return;
+    if (filteredPrompts.length === 0) return;
     const activeProj = projects.find((p) => p.id === selectedProject);
-    const projTitle = activeProj?.name || "Proyek DNAverse";
-    const sections = filteredArtifacts.map((t) => {
+    const projTitle = activeProj?.name || "Proyek";
+    const sections = filteredPrompts.map((t) => {
       const payload = (t.input_payload ?? {}) as Record<string, unknown>;
       const stepOrder = Number(payload.stepOrder ?? t.step_order ?? 1);
-      return `## #${stepOrder} • ${t.title}\n\n${getOutputBody(t)}`;
+      return `## #${stepOrder} • ${t.title}\n\n${getPromptBody(t)}`;
     });
 
     downloadMdFile(
-      "content-studio-kompilasi.md",
-      `# Content Studio — ${projTitle}\n\n${sections.join("\n\n---\n\n")}\n`
+      "content-studio-master-prompts.md",
+      `# Content Studio (Prompt Only) — ${projTitle}\n\n${sections.join(
+        "\n\n---\n\n"
+      )}\n`
     );
   };
 
@@ -289,8 +312,8 @@ export function ContentStudioWorkspace() {
       {isLoggedIn === false && (
         <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-xs text-amber-300 flex flex-wrap items-center justify-between gap-2">
           <span>
-            Anda belum login. Silakan masuk untuk melihat hasil artefak proyek
-            di Content Studio.
+            Anda belum login. Silakan masuk untuk melihat daftar prompt di
+            Content Studio.
           </span>
           <Link
             href="/login"
@@ -352,30 +375,52 @@ export function ContentStudioWorkspace() {
             })}
           </select>
 
-          <select
-            value={agentFilter}
-            onChange={(e) => setAgentFilter(e.target.value)}
-            aria-label="Filter Agen"
-            className="rounded-xl border border-slate-200 dark:border-studio-border bg-slate-50 dark:bg-studio-navy px-3 py-1.5 text-xs font-medium focus:border-blue-500 focus:outline-none"
-          >
-            <option value="all">Semua Agen</option>
-            {agentOptions.map((ag) => (
-              <option key={ag} value={ag}>
-                {ag}
-              </option>
-            ))}
-          </select>
+          <div className="inline-flex rounded-xl border border-slate-700 bg-slate-900/80 p-1 text-xs">
+            <button
+              type="button"
+              onClick={() => setPromptCategory("all")}
+              className={`rounded-lg px-2.5 py-1 font-medium transition ${
+                promptCategory === "all"
+                  ? "bg-blue-600 text-white"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              Semua Prompt
+            </button>
+            <button
+              type="button"
+              onClick={() => setPromptCategory("clip_master")}
+              className={`rounded-lg px-2.5 py-1 font-medium transition ${
+                promptCategory === "clip_master"
+                  ? "bg-purple-600 text-white"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              Master Prompt Klip
+            </button>
+            <button
+              type="button"
+              onClick={() => setPromptCategory("creative_prompt")}
+              className={`rounded-lg px-2.5 py-1 font-medium transition ${
+                promptCategory === "creative_prompt"
+                  ? "bg-emerald-600 text-white"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              Prompt Dasar
+            </button>
+          </div>
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          {filteredArtifacts.length > 0 && (
+          {filteredPrompts.length > 0 && (
             <button
               type="button"
               onClick={handleExportCompilation}
               className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:opacity-95"
             >
               <Download className="h-3.5 w-3.5" />
-              <span>Unduh Kompilasi (.md)</span>
+              <span>Unduh Prompt (.md)</span>
             </button>
           )}
           <Link
@@ -387,46 +432,49 @@ export function ContentStudioWorkspace() {
         </div>
       </div>
 
-      {/* Ringkasan Artefak */}
+      {/* Ringkasan Prompt */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div className="glass-panel rounded-2xl p-4">
           <div className="flex items-center gap-2 text-xs text-slate-400">
-            <Layers className="h-4 w-4 text-emerald-400" />
-            <span>Artefak Selesai</span>
+            <Layers className="h-4 w-4 text-blue-400" />
+            <span>Total Prompt Aktif</span>
           </div>
-          <p className="mt-1.5 text-2xl font-bold">{filteredArtifacts.length}</p>
+          <p className="mt-1.5 text-2xl font-bold">{filteredPrompts.length}</p>
         </div>
         <div className="glass-panel rounded-2xl p-4">
           <div className="flex items-center gap-2 text-xs text-slate-400">
-            <FileText className="h-4 w-4 text-blue-400" />
-            <span>Sesi Eksekusi</span>
+            <Film className="h-4 w-4 text-purple-400" />
+            <span>Master Prompt Klip (Video)</span>
           </div>
-          <p className="mt-1.5 text-2xl font-bold">{runs.length}</p>
+          <p className="mt-1.5 text-2xl font-bold">{clipMasterCount}</p>
         </div>
         <div className="glass-panel rounded-2xl p-4">
           <div className="flex items-center gap-2 text-xs text-slate-400">
-            <Sparkles className="h-4 w-4 text-purple-400" />
-            <span>Agen Aktif</span>
+            <FileText className="h-4 w-4 text-emerald-400" />
+            <span>Prompt Dasar (Cerita/Visual)</span>
           </div>
-          <p className="mt-1.5 text-2xl font-bold">{agentOptions.length}</p>
+          <p className="mt-1.5 text-2xl font-bold">{creativePromptCount}</p>
         </div>
       </div>
 
-      {/* Daftar Artefak Hasil Agen */}
+      {/* Daftar Prompt Utuh */}
       <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-base font-semibold">
-            Repositori Artefak Kreatif ({filteredArtifacts.length})
-          </h2>
-          <Badge variant="emerald">Live PostgreSQL</Badge>
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center gap-2">
+            <Sparkles className="h-4 w-4 text-purple-400" />
+            <h2 className="text-base font-semibold">
+              Katalog Prompt Utuh ({filteredPrompts.length})
+            </h2>
+          </div>
+          <Badge variant="purple">Prompt Only • Tanpa Media</Badge>
         </div>
 
         {loading ? (
-          <p className="text-xs text-slate-400 py-6">Memuat artefak...</p>
-        ) : filteredArtifacts.length === 0 ? (
+          <p className="text-xs text-slate-400 py-6">Memuat daftar prompt...</p>
+        ) : filteredPrompts.length === 0 ? (
           <div className="py-8 text-center space-y-2">
             <p className="text-xs text-slate-400">
-              Belum ada tugas berstatus completed untuk filter yang dipilih.
+              Belum ada prompt selesai untuk filter yang dipilih.
             </p>
             <Link
               href="/command-center"
@@ -437,15 +485,13 @@ export function ContentStudioWorkspace() {
           </div>
         ) : (
           <div className="space-y-3">
-            {filteredArtifacts.map((t) => {
+            {filteredPrompts.map((t) => {
               const payload = (t.input_payload ?? {}) as Record<string, unknown>;
-              const out = (t.output_payload ?? {}) as Record<string, unknown>;
               const stepOrder = Number(payload.stepOrder ?? t.step_order ?? 1);
+              const code = getAgentCode(t);
+              const isClipMaster = code === "video";
               const agentName = String(
                 payload.agentName || payload.agentCode || "Agent"
-              );
-              const deliverableType = String(
-                out.deliverableType || payload.estimatedOutput || "Artefak"
               );
               const isCopied = copiedId === t.id;
               const isSaving = savingMemId === t.id;
@@ -462,8 +508,9 @@ export function ContentStudioWorkspace() {
                         <span>
                           #{stepOrder} • {t.title}
                         </span>
-                        <Badge variant="purple">{agentName}</Badge>
-                        <Badge variant="blue">{deliverableType}</Badge>
+                        <Badge variant={isClipMaster ? "purple" : "blue"}>
+                          {isClipMaster ? "Master Prompt Klip" : agentName}
+                        </Badge>
                       </div>
                       <p className="text-[11px] text-slate-400">
                         {String(payload.instruction ?? "")}
@@ -484,7 +531,7 @@ export function ContentStudioWorkspace() {
                         ) : (
                           <>
                             <Copy className="h-3 w-3 text-blue-400" />
-                            <span>Salin</span>
+                            <span>Salin Prompt</span>
                           </>
                         )}
                       </button>
@@ -515,7 +562,7 @@ export function ContentStudioWorkspace() {
                   </div>
 
                   <div className="rounded-xl border border-slate-700/50 bg-slate-900/60 p-3 whitespace-pre-line text-slate-200 leading-relaxed">
-                    {getOutputBody(t)}
+                    {getPromptBody(t)}
                   </div>
                 </div>
               );
