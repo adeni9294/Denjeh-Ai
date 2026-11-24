@@ -30,6 +30,8 @@ import {
   Check,
   Download,
   BookmarkPlus,
+  Trash2,
+  Terminal,
 } from "lucide-react";
 
 interface AttachmentRef {
@@ -80,6 +82,7 @@ function triggerMarkdownDownload(filename: string, markdown: string) {
 
 export function CommandWorkspace() {
   const searchParams = useSearchParams();
+  const [activeTab, setActiveTab] = useState<"command" | "history">("command");
   const [projects, setProjects] = useState<DbProject[]>([]);
   const [selectedProject, setSelectedProject] = useState<string>("");
   const [mode, setMode] = useState<"manual" | "autonomous">("manual");
@@ -100,6 +103,8 @@ export function CommandWorkspace() {
   const [savedMemoryTaskIds, setSavedMemoryTaskIds] = useState<
     Record<string, boolean>
   >({});
+  const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
+  const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isLoggedIn, setIsLoggedIn] = useState<boolean | null>(null);
 
@@ -116,14 +121,14 @@ export function CommandWorkspace() {
         .select("*")
         .eq("user_id", user.id)
         .order("created_at", { ascending: false })
-        .limit(15);
+        .limit(20);
 
       let tasksQuery = supabase
         .from("tasks")
         .select("*")
         .eq("user_id", user.id)
         .order("created_at", { ascending: false })
-        .limit(40);
+        .limit(50);
 
       if (projectId) {
         runsQuery = runsQuery.eq("project_id", projectId);
@@ -203,6 +208,7 @@ export function CommandWorkspace() {
 
   const handleOpenHistoryRun = async (run: DbWorkflowRun) => {
     setActiveRunId(run.id);
+    setActiveTab("command");
     const supabase = createSupabaseBrowserClient();
     const { data } = await supabase
       .from("tasks")
@@ -277,6 +283,83 @@ export function CommandWorkspace() {
     ];
 
     setMessages(restoredMessages);
+  };
+
+  const handleDeleteRun = async (runId: string) => {
+    if (deletingRunId) return;
+    setDeletingRunId(runId);
+    setErrorMsg(null);
+
+    try {
+      const supabase = createSupabaseBrowserClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+
+      await supabase
+        .from("tasks")
+        .delete()
+        .eq("workflow_run_id", runId)
+        .eq("user_id", user.id);
+
+      const { error } = await supabase
+        .from("workflow_runs")
+        .delete()
+        .eq("id", runId)
+        .eq("user_id", user.id);
+
+      if (error) {
+        setErrorMsg(error.message || "Gagal menghapus riwayat perintah.");
+        return;
+      }
+
+      if (activeRunId === runId) {
+        setActiveRunId(null);
+        setMessages([]);
+      }
+
+      await loadHistoryAndTasks(selectedProject);
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : "Gagal menghapus riwayat."
+      );
+    } finally {
+      setDeletingRunId(null);
+    }
+  };
+
+  const handleDeleteTask = async (taskId: string) => {
+    if (deletingTaskId) return;
+    setDeletingTaskId(taskId);
+    setErrorMsg(null);
+
+    try {
+      const supabase = createSupabaseBrowserClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { error } = await supabase
+        .from("tasks")
+        .delete()
+        .eq("id", taskId)
+        .eq("user_id", user.id);
+
+      if (error) {
+        setErrorMsg(error.message || "Gagal menghapus tugas.");
+        return;
+      }
+
+      await loadHistoryAndTasks(selectedProject);
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : "Gagal menghapus tugas."
+      );
+    } finally {
+      setDeletingTaskId(null);
+    }
   };
 
   const handleApproveRun = async (msg: CommandMessage) => {
@@ -570,6 +653,7 @@ export function CommandWorkspace() {
 
     setErrorMsg(null);
     setSubmitting(true);
+    setActiveTab("command");
 
     const nowLabel = new Date().toLocaleTimeString("id-ID", {
       hour: "2-digit",
@@ -757,12 +841,39 @@ export function CommandWorkspace() {
         </div>
       )}
 
-      {/* Control Bar */}
-      <div className="glass-panel rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
+      {/* Control Bar + Tab Command / History */}
+      <div className="glass-panel rounded-2xl p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2.5">
+          <div className="inline-flex rounded-xl border border-slate-200 dark:border-studio-border bg-slate-100 dark:bg-studio-navy p-1">
+            <button
+              type="button"
+              onClick={() => setActiveTab("command")}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                activeTab === "command"
+                  ? "bg-blue-600 text-white"
+                  : "text-slate-600 dark:text-slate-400"
+              }`}
+            >
+              <Terminal className="h-3.5 w-3.5" />
+              <span>Command</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("history")}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                activeTab === "history"
+                  ? "bg-purple-600 text-white"
+                  : "text-slate-600 dark:text-slate-400"
+              }`}
+            >
+              <History className="h-3.5 w-3.5" />
+              <span>History ({historyRuns.length})</span>
+            </button>
+          </div>
+
           <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500 dark:text-slate-400">
             <SlidersHorizontal className="h-4 w-4 text-blue-500" />
-            <span>Proyek Aktif:</span>
+            <span>Proyek:</span>
           </div>
           <select
             value={selectedProject}
@@ -818,468 +929,534 @@ export function CommandWorkspace() {
         </div>
       </div>
 
-      {/* Panel Riwayat Perintah & Rencana (Tersimpan Otomatis di Database) */}
-      {isLoggedIn && historyRuns.length > 0 && (
-        <div className="glass-panel rounded-2xl p-4 space-y-2.5">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-xs font-semibold">
-              <History className="h-4 w-4 text-purple-400" />
-              <span>Riwayat Perintah Proyek ({historyRuns.length})</span>
-            </div>
-            <span className="text-[11px] text-slate-500 dark:text-slate-400">
-              Klik riwayat untuk membuka kembali rencana
-            </span>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            {historyRuns.map((run) => {
-              const planMeta = getPlanMeta(run);
-              const stepsArr = Array.isArray(planMeta.steps)
-                ? planMeta.steps
-                : [];
-              const stepCount =
-                stepsArr.length > 0
-                  ? stepsArr.length
-                  : Number(planMeta.totalSteps || run.total_steps || 0);
-              const labelTitle = String(
-                planMeta.title ||
-                  run.title ||
-                  `Workflow Run #${run.id.slice(0, 8)}`
-              );
-
-              return (
-                <button
-                  key={run.id}
-                  type="button"
-                  onClick={() => handleOpenHistoryRun(run)}
-                  className={`text-left rounded-xl border p-3 transition flex items-start justify-between gap-2 ${
-                    activeRunId === run.id
-                      ? "border-blue-500 bg-blue-500/10"
-                      : "border-slate-200/80 dark:border-studio-border bg-slate-50/70 dark:bg-studio-navy/70 hover:border-blue-500/40"
-                  }`}
-                >
-                  <div className="min-w-0 flex-1">
-                    <p className="text-xs font-medium truncate">{labelTitle}</p>
-                    <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
-                      {stepCount} langkah •{" "}
-                      {new Date(run.created_at).toLocaleString("id-ID", {
-                        day: "2-digit",
-                        month: "short",
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <Badge
-                      variant={
-                        run.status === "completed"
-                          ? "emerald"
-                          : run.status === "running"
-                          ? "blue"
-                          : "amber"
-                      }
-                    >
-                      {run.status === "waiting_approval" ? "Draf" : run.status}
-                    </Badge>
-                    <FolderOpen className="h-3.5 w-3.5 text-slate-400" />
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Conversation & Execution Plan Feed */}
-      <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-5 min-h-[280px] max-h-[58vh] overflow-y-auto">
-        {messages.length === 0 ? (
-          <div className="py-8 text-center space-y-3 max-w-xl mx-auto">
-            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-500/15 text-blue-400">
-              <Bot className="h-6 w-6" />
-            </div>
-            <h3 className="text-base font-semibold">
-              Master Orchestrator Siap
-            </h3>
-            <p className="text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-              Setiap instruksi dan rencana yang Anda kirim otomatis tersimpan di
-              riwayat proyek sehingga tidak akan hilang saat Anda berpindah menu.
-            </p>
-            <button
-              type="button"
-              onClick={() =>
-                setInput(
-                  "Buat film pendek live-action fantasy action 60 detik untuk DNAverse. Kembangkan cerita, profil karakter, storyboard, arahan visual, prompt video yang dibagi menjadi klip 10-15 detik, caption media sosial, serta saran jadwal publikasi."
-                )
-              }
-              className="rounded-xl border border-blue-500/30 bg-blue-500/10 px-3.5 py-2 text-xs font-medium text-blue-400 hover:bg-blue-500/20"
-            >
-              Gunakan Contoh Perintah DNAverse 60 Detik
-            </button>
-          </div>
-        ) : (
-          messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`flex gap-3 ${
-                msg.sender === "user" ? "flex-row-reverse" : "flex-row"
-              }`}
-            >
-              <div
-                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${
-                  msg.sender === "user"
-                    ? "bg-blue-600 text-white"
-                    : "bg-purple-600/20 text-purple-400 border border-purple-500/30"
-                }`}
-              >
-                {msg.sender === "user" ? (
-                  <User className="h-4 w-4" />
-                ) : (
-                  <Bot className="h-4 w-4" />
-                )}
-              </div>
-
-              <div
-                className={`flex-1 max-w-3xl rounded-2xl p-4 ${
-                  msg.sender === "user"
-                    ? "bg-blue-600 text-white"
-                    : "border border-slate-200 dark:border-studio-border bg-slate-50 dark:bg-studio-navy"
-                }`}
-              >
-                <div className="flex items-center justify-between gap-2 mb-1.5 text-[11px] opacity-80">
-                  <span className="font-semibold">
-                    {msg.sender === "user" ? "Anda" : "Master Orchestrator"}
-                  </span>
-                  <span>{msg.timestamp}</span>
-                </div>
-                <p className="text-sm leading-relaxed whitespace-pre-line">
-                  {msg.content}
-                </p>
-
-                {msg.plan && (
-                  <div className="mt-4 space-y-2 border-t border-slate-200 dark:border-studio-border pt-3">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold text-blue-500 dark:text-blue-400">
-                        Rencana Eksekusi Multi-Agen (JSON DAG)
-                      </span>
-                      <Badge variant={msg.approved ? "emerald" : "amber"}>
-                        {msg.approved ? "Disetujui & Berjalan" : "Draf Tersimpan"}
-                      </Badge>
-                    </div>
-
-                    <div className="space-y-2">
-                      {msg.plan.map((step) => (
-                        <div
-                          key={step.stepNumber}
-                          className="rounded-xl border border-slate-200/80 dark:border-studio-border bg-white dark:bg-studio-card p-3 text-xs"
-                        >
-                          <div className="flex flex-wrap items-center justify-between gap-1 font-semibold">
-                            <span>
-                              #{step.stepNumber} • {step.agentName}
-                            </span>
-                            <span className="text-[11px] font-normal text-slate-500 dark:text-slate-400">
-                              Dependensi: {step.dependsOn}
-                            </span>
-                          </div>
-                          <p className="mt-1 text-slate-600 dark:text-slate-300">
-                            {step.action}
-                          </p>
-                          <div className="mt-2 flex items-center justify-between gap-2">
-                            <span className="text-[11px] text-purple-500 dark:text-purple-400">
-                              Output: {step.estimatedOutput}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => handleRequestRevision(step.agentName)}
-                              className="inline-flex items-center gap-1 text-[11px] text-slate-500 hover:text-blue-400"
-                            >
-                              <RotateCcw className="h-3 w-3" />
-                              <span>Revisi Langkah</span>
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-
-                    {msg.requiresApproval && !msg.approved && (
-                      <div className="pt-2 flex justify-end">
-                        <button
-                          type="button"
-                          disabled={approvingRun}
-                          onClick={() => handleApproveRun(msg)}
-                          className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
-                        >
-                          <Play className="h-3.5 w-3.5" />
-                          <span>
-                            {approvingRun
-                              ? "Menyetujui..."
-                              : "Setujui & Jalankan Antrean Tugas"}
-                          </span>
-                        </button>
-                      </div>
-                    )}
-
-                    {msg.approved && (
-                      <div className="pt-1 flex items-center gap-1.5 text-xs text-emerald-500">
-                        <CheckCircle2 className="h-4 w-4" />
-                        <span>
-                          Rencana disetujui dan siap dijalankan oleh Multi-Agent
-                          System.
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-          ))
-        )}
-      </div>
-
-      {/* Attachment Chips */}
-      {attachments.length > 0 && (
-        <div className="flex flex-wrap gap-2">
-          {attachments.map((att, idx) => (
-            <span
-              key={`${att.name}-${idx}`}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs text-blue-400"
-            >
-              <span>{att.name}</span>
-              <button
-                type="button"
-                onClick={() => removeAttachment(idx)}
-                aria-label="Hapus lampiran"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-
-      {/* Command Input Form */}
-      <form
-        onSubmit={handleSendCommand}
-        className="glass-panel rounded-2xl p-3 sm:p-4 space-y-2.5"
-      >
-        <textarea
-          rows={3}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="Tulis instruksi kreatif atau permintaan revisi lanjutan ke Master Orchestrator..."
-          className="w-full resize-none rounded-xl border border-slate-200 dark:border-studio-border bg-slate-50 dark:bg-studio-navy px-3.5 py-2.5 text-sm focus:border-blue-500 focus:outline-none"
-        />
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-slate-200 dark:border-studio-border bg-slate-50 dark:bg-studio-navy px-3 py-2 text-xs font-medium text-slate-600 dark:text-slate-300 hover:border-blue-500/40">
-            <Paperclip className="h-3.5 w-3.5 text-blue-500" />
-            <span>Lampirkan File / Referensi Gambar</span>
-            <input
-              type="file"
-              multiple
-              accept="image/*,.pdf,.txt,.md,.json"
-              onChange={handleFileAttach}
-              className="hidden"
-            />
-          </label>
-
-          <button
-            type="submit"
-            disabled={submitting || !input.trim()}
-            className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 px-5 py-2.5 text-sm font-semibold text-white hover:opacity-95 disabled:opacity-50"
-          >
-            <span>
-              {submitting ? "Menyusun Rencana..." : "Kirim Instruksi"}
-            </span>
-            <Send className="h-4 w-4" />
-          </button>
-        </div>
-      </form>
-
-      {/* Panel Antrean Tugas Orkestrasi (PostgreSQL) */}
-      {isLoggedIn && visibleTasks.length > 0 && (
+      {activeTab === "history" ? (
+        /* Tab History Perintah Proyek */
         <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
-          <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
-              <ListChecks className="h-5 w-5 text-emerald-400" />
+              <History className="h-5 w-5 text-purple-400" />
               <h2 className="text-base font-semibold">
-                Antrean Tugas Orkestrasi ({visibleTasks.length})
+                Riwayat Perintah Proyek ({historyRuns.length})
               </h2>
             </div>
-            <div className="flex items-center gap-2 flex-wrap">
-              {visibleTasks.some((t) => t.status === "completed") && (
-                <button
-                  type="button"
-                  onClick={handleExportAllPackage}
-                  className="inline-flex items-center gap-1 rounded-lg border border-blue-500/30 bg-blue-500/15 px-3 py-1 text-[11px] font-semibold text-blue-300 hover:bg-blue-500/25"
-                >
-                  <Download className="h-3 w-3" />
-                  <span>Ekspor Paket .md</span>
-                </button>
-              )}
-              {visibleTasks.some((t) => t.status !== "completed") && (
-                <button
-                  type="button"
-                  disabled={runningChain || Boolean(runningTaskId)}
-                  onClick={handleRunChain}
-                  className="rounded-lg bg-gradient-to-r from-purple-600 to-blue-600 px-3 py-1 text-[11px] font-semibold text-white hover:opacity-95 disabled:opacity-50"
-                >
-                  {runningChain
-                    ? "Menjalankan Berantai..."
-                    : "Jalankan Berantai"}
-                </button>
-              )}
-              <Badge variant="emerald">Tersimpan di PostgreSQL</Badge>
-            </div>
+            <button
+              type="button"
+              onClick={() => setActiveTab("command")}
+              className="text-xs font-medium text-blue-400 hover:underline"
+            >
+              Kembali ke Tab Command →
+            </button>
           </div>
 
-          <div className="space-y-2">
-            {visibleTasks.map((t) => {
-              const payload = (t.input_payload ?? {}) as Record<string, unknown>;
-              const out = (t.output_payload ?? {}) as Record<string, unknown>;
-              const stepOrder = Number(
-                payload.stepOrder ?? t.step_order ?? 1
-              );
-              const instructionText = String(
-                payload.instruction ?? t.instruction ?? ""
-              );
-              const isRunningThis = runningTaskId === t.id;
-              const isCopiedThis = copiedTaskId === t.id;
-              const isSavingMemThis = savingMemoryTaskId === t.id;
-              const isSavedMemThis = Boolean(savedMemoryTaskIds[t.id]);
+          {historyRuns.length === 0 ? (
+            <p className="text-xs text-slate-400 py-6 text-center">
+              Belum ada riwayat perintah tersimpan untuk proyek ini.
+            </p>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+              {historyRuns.map((run) => {
+                const planMeta = getPlanMeta(run);
+                const stepsArr = Array.isArray(planMeta.steps)
+                  ? planMeta.steps
+                  : [];
+                const stepCount =
+                  stepsArr.length > 0
+                    ? stepsArr.length
+                    : Number(planMeta.totalSteps || run.total_steps || 0);
+                const labelTitle = String(
+                  planMeta.title ||
+                    run.title ||
+                    `Workflow Run #${run.id.slice(0, 8)}`
+                );
 
-              return (
-                <div
-                  key={t.id}
-                  className="rounded-xl border border-slate-200/80 dark:border-studio-border bg-slate-50/70 dark:bg-studio-navy/80 p-3 space-y-2 text-xs"
-                >
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                    <div>
-                      <div className="flex flex-wrap items-center gap-2 font-semibold">
-                        <span>
-                          #{stepOrder} • {t.title}
-                        </span>
-                        <Badge
-                          variant={
-                            t.status === "completed"
-                              ? "emerald"
-                              : t.status === "running"
-                              ? "blue"
-                              : t.status === "failed"
-                              ? "rose"
-                              : "amber"
-                          }
-                        >
-                          {t.status}
-                        </Badge>
-                        <span className="text-[11px] font-normal text-slate-400">
-                          {t.progress ?? 0}%
-                        </span>
-                      </div>
-                      <p className="mt-0.5 text-slate-600 dark:text-slate-400">
-                        {instructionText}
+                return (
+                  <div
+                    key={run.id}
+                    className={`rounded-xl border p-3 transition flex items-start justify-between gap-2 ${
+                      activeRunId === run.id
+                        ? "border-blue-500 bg-blue-500/10"
+                        : "border-slate-200/80 dark:border-studio-border bg-slate-50/70 dark:bg-studio-navy/70 hover:border-blue-500/40"
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => handleOpenHistoryRun(run)}
+                      className="text-left min-w-0 flex-1"
+                    >
+                      <p className="text-xs font-medium truncate">{labelTitle}</p>
+                      <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                        {stepCount} langkah •{" "}
+                        {new Date(run.created_at).toLocaleString("id-ID", {
+                          day: "2-digit",
+                          month: "short",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
                       </p>
-                    </div>
+                    </button>
 
-                    <div className="flex items-center gap-2 shrink-0 flex-wrap">
-                      {t.status !== "completed" && (
-                        <button
-                          type="button"
-                          disabled={isRunningThis || runningChain}
-                          onClick={() => handleRunTask(t.id)}
-                          className="rounded-lg bg-purple-600/20 border border-purple-500/30 px-2.5 py-1 text-[11px] font-medium text-purple-300 hover:bg-purple-600/30 disabled:opacity-50"
-                        >
-                          {isRunningThis ? "Menjalankan..." : "Jalankan Agen"}
-                        </button>
-                      )}
-                      {t.status !== "running" && t.status !== "completed" && (
-                        <button
-                          type="button"
-                          onClick={() => handleUpdateTaskStatus(t.id, "running")}
-                          className="rounded-lg bg-blue-600/20 border border-blue-500/30 px-2.5 py-1 text-[11px] font-medium text-blue-400 hover:bg-blue-600/30"
-                        >
-                          Mulai
-                        </button>
-                      )}
-                      {t.status !== "completed" && (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleUpdateTaskStatus(t.id, "completed")
-                          }
-                          className="rounded-lg bg-emerald-600/20 border border-emerald-500/30 px-2.5 py-1 text-[11px] font-medium text-emerald-400 hover:bg-emerald-600/30"
-                        >
-                          Selesai
-                        </button>
-                      )}
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <Badge
+                        variant={
+                          run.status === "completed"
+                            ? "emerald"
+                            : run.status === "running"
+                            ? "blue"
+                            : "amber"
+                        }
+                      >
+                        {run.status === "waiting_approval"
+                          ? "Draf"
+                          : run.status}
+                      </Badge>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenHistoryRun(run)}
+                        aria-label="Buka riwayat"
+                        className="rounded-lg border border-slate-600/40 bg-slate-800/70 p-1 text-slate-300 hover:bg-slate-700/70"
+                      >
+                        <FolderOpen className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        disabled={deletingRunId === run.id}
+                        onClick={() => handleDeleteRun(run.id)}
+                        aria-label="Hapus riwayat perintah"
+                        className="rounded-lg border border-rose-500/30 bg-rose-600/20 p-1 text-rose-300 hover:bg-rose-600/30 disabled:opacity-50"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
                     </div>
                   </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      ) : (
+        <>
+          {/* Conversation & Execution Plan Feed */}
+          <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-5 min-h-[260px] max-h-[54vh] overflow-y-auto">
+            {messages.length === 0 ? (
+              <div className="py-8 text-center space-y-3 max-w-xl mx-auto">
+                <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-500/15 text-blue-400">
+                  <Bot className="h-6 w-6" />
+                </div>
+                <h3 className="text-base font-semibold">
+                  Master Orchestrator Siap
+                </h3>
+                <p className="text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+                  Riwayat perintah kini tersimpan rapi di tab{" "}
+                  <strong className="text-purple-300">History</strong> agar
+                  tampilan workspace tetap ringkas. Klik riwayat kapan saja untuk
+                  membukanya kembali.
+                </p>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setInput(
+                      "Buat film pendek live-action fantasy action 60 detik untuk DNAverse. Kembangkan cerita, profil karakter, storyboard, arahan visual, prompt video yang dibagi menjadi klip 10-15 detik, caption media sosial, serta saran jadwal publikasi."
+                    )
+                  }
+                  className="rounded-xl border border-blue-500/30 bg-blue-500/10 px-3.5 py-2 text-xs font-medium text-blue-400 hover:bg-blue-500/20"
+                >
+                  Gunakan Contoh Perintah DNAverse 60 Detik
+                </button>
+              </div>
+            ) : (
+              messages.map((msg) => (
+                <div
+                  key={msg.id}
+                  className={`flex gap-3 ${
+                    msg.sender === "user" ? "flex-row-reverse" : "flex-row"
+                  }`}
+                >
+                  <div
+                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${
+                      msg.sender === "user"
+                        ? "bg-blue-600 text-white"
+                        : "bg-purple-600/20 text-purple-400 border border-purple-500/30"
+                    }`}
+                  >
+                    {msg.sender === "user" ? (
+                      <User className="h-4 w-4" />
+                    ) : (
+                      <Bot className="h-4 w-4" />
+                    )}
+                  </div>
 
-                  {t.status === "completed" &&
-                    Boolean(out.summary || out.contentMarkdown) && (
-                      <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-2.5 space-y-2">
-                        <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleCopyTaskOutput(t.id, t, out)
-                            }
-                            className="inline-flex items-center gap-1 rounded-md border border-slate-600/40 bg-slate-800/70 px-2 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-700/70"
-                          >
-                            {isCopiedThis ? (
-                              <>
-                                <Check className="h-3 w-3 text-emerald-400" />
-                                <span>Tersalin</span>
-                              </>
-                            ) : (
-                              <>
-                                <Copy className="h-3 w-3 text-blue-400" />
-                                <span>Salin</span>
-                              </>
-                            )}
-                          </button>
+                  <div
+                    className={`flex-1 max-w-3xl rounded-2xl p-4 ${
+                      msg.sender === "user"
+                        ? "bg-blue-600 text-white"
+                        : "border border-slate-200 dark:border-studio-border bg-slate-50 dark:bg-studio-navy"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2 mb-1.5 text-[11px] opacity-80">
+                      <span className="font-semibold">
+                        {msg.sender === "user"
+                          ? "Anda"
+                          : "Master Orchestrator"}
+                      </span>
+                      <span>{msg.timestamp}</span>
+                    </div>
+                    <p className="text-sm leading-relaxed whitespace-pre-line">
+                      {msg.content}
+                    </p>
 
-                          <button
-                            type="button"
-                            onClick={() => handleDownloadTaskOutput(t, out)}
-                            className="inline-flex items-center gap-1 rounded-md border border-slate-600/40 bg-slate-800/70 px-2 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-700/70"
-                          >
-                            <Download className="h-3 w-3 text-purple-400" />
-                            <span>Unduh .md</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            disabled={isSavingMemThis || isSavedMemThis}
-                            onClick={() => handleSaveTaskToMemory(t, out)}
-                            className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-600/20 px-2 py-1 text-[11px] font-medium text-emerald-300 hover:bg-emerald-600/30 disabled:opacity-60"
-                          >
-                            <BookmarkPlus className="h-3 w-3" />
-                            <span>
-                              {isSavedMemThis
-                                ? "Tersimpan di Memori"
-                                : isSavingMemThis
-                                ? "Menyimpan..."
-                                : "Simpan ke Memori"}
-                            </span>
-                          </button>
+                    {msg.plan && (
+                      <div className="mt-4 space-y-2 border-t border-slate-200 dark:border-studio-border pt-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-semibold text-blue-500 dark:text-blue-400">
+                            Rencana Eksekusi Multi-Agen (JSON DAG)
+                          </span>
+                          <Badge variant={msg.approved ? "emerald" : "amber"}>
+                            {msg.approved
+                              ? "Disetujui & Berjalan"
+                              : "Draf Tersimpan"}
+                          </Badge>
                         </div>
 
-                        {Boolean(out.summary) && (
-                          <p className="font-medium text-emerald-300">
-                            {String(out.summary)}
-                          </p>
+                        <div className="space-y-2">
+                          {msg.plan.map((step) => (
+                            <div
+                              key={step.stepNumber}
+                              className="rounded-xl border border-slate-200/80 dark:border-studio-border bg-white dark:bg-studio-card p-3 text-xs"
+                            >
+                              <div className="flex flex-wrap items-center justify-between gap-1 font-semibold">
+                                <span>
+                                  #{step.stepNumber} • {step.agentName}
+                                </span>
+                                <span className="text-[11px] font-normal text-slate-500 dark:text-slate-400">
+                                  Dependensi: {step.dependsOn}
+                                </span>
+                              </div>
+                              <p className="mt-1 text-slate-600 dark:text-slate-300">
+                                {step.action}
+                              </p>
+                              <div className="mt-2 flex items-center justify-between gap-2">
+                                <span className="text-[11px] text-purple-500 dark:text-purple-400">
+                                  Output: {step.estimatedOutput}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleRequestRevision(step.agentName)
+                                  }
+                                  className="inline-flex items-center gap-1 text-[11px] text-slate-500 hover:text-blue-400"
+                                >
+                                  <RotateCcw className="h-3 w-3" />
+                                  <span>Revisi Langkah</span>
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {msg.requiresApproval && !msg.approved && (
+                          <div className="pt-2 flex justify-end">
+                            <button
+                              type="button"
+                              disabled={approvingRun}
+                              onClick={() => handleApproveRun(msg)}
+                              className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
+                            >
+                              <Play className="h-3.5 w-3.5" />
+                              <span>
+                                {approvingRun
+                                  ? "Menyetujui..."
+                                  : "Setujui & Jalankan Antrean Tugas"}
+                              </span>
+                            </button>
+                          </div>
                         )}
-                        {Boolean(out.contentMarkdown) && (
-                          <p className="whitespace-pre-line text-slate-300 leading-relaxed">
-                            {String(out.contentMarkdown)}
-                          </p>
+
+                        {msg.approved && (
+                          <div className="pt-1 flex items-center gap-1.5 text-xs text-emerald-500">
+                            <CheckCircle2 className="h-4 w-4" />
+                            <span>
+                              Rencana disetujui dan siap dijalankan oleh
+                              Multi-Agent System.
+                            </span>
+                          </div>
                         )}
                       </div>
                     )}
+                  </div>
                 </div>
-              );
-            })}
+              ))
+            )}
           </div>
-        </div>
+
+          {/* Attachment Chips */}
+          {attachments.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {attachments.map((att, idx) => (
+                <span
+                  key={`${att.name}-${idx}`}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs text-blue-400"
+                >
+                  <span>{att.name}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(idx)}
+                    aria-label="Hapus lampiran"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* Command Input Form */}
+          <form
+            onSubmit={handleSendCommand}
+            className="glass-panel rounded-2xl p-3 sm:p-4 space-y-2.5"
+          >
+            <textarea
+              rows={3}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="Tulis instruksi kreatif atau permintaan revisi lanjutan ke Master Orchestrator..."
+              className="w-full resize-none rounded-xl border border-slate-200 dark:border-studio-border bg-slate-50 dark:bg-studio-navy px-3.5 py-2.5 text-sm focus:border-blue-500 focus:outline-none"
+            />
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-slate-200 dark:border-studio-border bg-slate-50 dark:bg-studio-navy px-3 py-2 text-xs font-medium text-slate-600 dark:text-slate-300 hover:border-blue-500/40">
+                <Paperclip className="h-3.5 w-3.5 text-blue-500" />
+                <span>Lampirkan File / Referensi Gambar</span>
+                <input
+                  type="file"
+                  multiple
+                  accept="image/*,.pdf,.txt,.md,.json"
+                  onChange={handleFileAttach}
+                  className="hidden"
+                />
+              </label>
+
+              <button
+                type="submit"
+                disabled={submitting || !input.trim()}
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 px-5 py-2.5 text-sm font-semibold text-white hover:opacity-95 disabled:opacity-50"
+              >
+                <span>
+                  {submitting ? "Menyusun Rencana..." : "Kirim Instruksi"}
+                </span>
+                <Send className="h-4 w-4" />
+              </button>
+            </div>
+          </form>
+
+          {/* Panel Antrean Tugas Orkestrasi (PostgreSQL) */}
+          {isLoggedIn && visibleTasks.length > 0 && (
+            <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <ListChecks className="h-5 w-5 text-emerald-400" />
+                  <h2 className="text-base font-semibold">
+                    Antrean Tugas Orkestrasi ({visibleTasks.length})
+                  </h2>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {visibleTasks.some((t) => t.status === "completed") && (
+                    <button
+                      type="button"
+                      onClick={handleExportAllPackage}
+                      className="inline-flex items-center gap-1 rounded-lg border border-blue-500/30 bg-blue-500/15 px-3 py-1 text-[11px] font-semibold text-blue-300 hover:bg-blue-500/25"
+                    >
+                      <Download className="h-3 w-3" />
+                      <span>Ekspor Paket .md</span>
+                    </button>
+                  )}
+                  {visibleTasks.some((t) => t.status !== "completed") && (
+                    <button
+                      type="button"
+                      disabled={runningChain || Boolean(runningTaskId)}
+                      onClick={handleRunChain}
+                      className="rounded-lg bg-gradient-to-r from-purple-600 to-blue-600 px-3 py-1 text-[11px] font-semibold text-white hover:opacity-95 disabled:opacity-50"
+                    >
+                      {runningChain
+                        ? "Menjalankan Berantai..."
+                        : "Jalankan Berantai"}
+                    </button>
+                  )}
+                  <Badge variant="emerald">Tersimpan di PostgreSQL</Badge>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                {visibleTasks.map((t) => {
+                  const payload = (t.input_payload ?? {}) as Record<
+                    string,
+                    unknown
+                  >;
+                  const out = (t.output_payload ?? {}) as Record<
+                    string,
+                    unknown
+                  >;
+                  const stepOrder = Number(
+                    payload.stepOrder ?? t.step_order ?? 1
+                  );
+                  const instructionText = String(
+                    payload.instruction ?? t.instruction ?? ""
+                  );
+                  const isRunningThis = runningTaskId === t.id;
+                  const isCopiedThis = copiedTaskId === t.id;
+                  const isSavingMemThis = savingMemoryTaskId === t.id;
+                  const isSavedMemThis = Boolean(savedMemoryTaskIds[t.id]);
+
+                  return (
+                    <div
+                      key={t.id}
+                      className="rounded-xl border border-slate-200/80 dark:border-studio-border bg-slate-50/70 dark:bg-studio-navy/80 p-3 space-y-2 text-xs"
+                    >
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2 font-semibold">
+                            <span>
+                              #{stepOrder} • {t.title}
+                            </span>
+                            <Badge
+                              variant={
+                                t.status === "completed"
+                                  ? "emerald"
+                                  : t.status === "running"
+                                  ? "blue"
+                                  : t.status === "failed"
+                                  ? "rose"
+                                  : "amber"
+                              }
+                            >
+                              {t.status}
+                            </Badge>
+                            <span className="text-[11px] font-normal text-slate-400">
+                              {t.progress ?? 0}%
+                            </span>
+                          </div>
+                          <p className="mt-0.5 text-slate-600 dark:text-slate-400">
+                            {instructionText}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                          {t.status !== "completed" && (
+                            <button
+                              type="button"
+                              disabled={isRunningThis || runningChain}
+                              onClick={() => handleRunTask(t.id)}
+                              className="rounded-lg bg-purple-600/20 border border-purple-500/30 px-2.5 py-1 text-[11px] font-medium text-purple-300 hover:bg-purple-600/30 disabled:opacity-50"
+                            >
+                              {isRunningThis
+                                ? "Menjalankan..."
+                                : "Jalankan Agen"}
+                            </button>
+                          )}
+                          {t.status !== "running" &&
+                            t.status !== "completed" && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleUpdateTaskStatus(t.id, "running")
+                                }
+                                className="rounded-lg bg-blue-600/20 border border-blue-500/30 px-2.5 py-1 text-[11px] font-medium text-blue-400 hover:bg-blue-600/30"
+                              >
+                                Mulai
+                              </button>
+                            )}
+                          {t.status !== "completed" && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleUpdateTaskStatus(t.id, "completed")
+                              }
+                              className="rounded-lg bg-emerald-600/20 border border-emerald-500/30 px-2.5 py-1 text-[11px] font-medium text-emerald-400 hover:bg-emerald-600/30"
+                            >
+                              Selesai
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            disabled={deletingTaskId === t.id}
+                            onClick={() => handleDeleteTask(t.id)}
+                            aria-label="Hapus tugas"
+                            className="rounded-lg bg-rose-600/20 border border-rose-500/30 p-1 text-rose-300 hover:bg-rose-600/30 disabled:opacity-50"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {t.status === "completed" &&
+                        Boolean(out.summary || out.contentMarkdown) && (
+                          <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-2.5 space-y-2">
+                            <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleCopyTaskOutput(t.id, t, out)
+                                }
+                                className="inline-flex items-center gap-1 rounded-md border border-slate-600/40 bg-slate-800/70 px-2 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-700/70"
+                              >
+                                {isCopiedThis ? (
+                                  <>
+                                    <Check className="h-3 w-3 text-emerald-400" />
+                                    <span>Tersalin</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy className="h-3 w-3 text-blue-400" />
+                                    <span>Salin</span>
+                                  </>
+                                )}
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleDownloadTaskOutput(t, out)
+                                }
+                                className="inline-flex items-center gap-1 rounded-md border border-slate-600/40 bg-slate-800/70 px-2 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-700/70"
+                              >
+                                <Download className="h-3 w-3 text-purple-400" />
+                                <span>Unduh .md</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                disabled={isSavingMemThis || isSavedMemThis}
+                                onClick={() => handleSaveTaskToMemory(t, out)}
+                                className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-600/20 px-2 py-1 text-[11px] font-medium text-emerald-300 hover:bg-emerald-600/30 disabled:opacity-60"
+                              >
+                                <BookmarkPlus className="h-3 w-3" />
+                                <span>
+                                  {isSavedMemThis
+                                    ? "Tersimpan di Memori"
+                                    : isSavingMemThis
+                                    ? "Menyimpan..."
+                                    : "Simpan ke Memori"}
+                                </span>
+                              </button>
+                            </div>
+
+                            {Boolean(out.summary) && (
+                              <p className="font-medium text-emerald-300">
+                                {String(out.summary)}
+                              </p>
+                            )}
+                            {Boolean(out.contentMarkdown) && (
+                              <p className="whitespace-pre-line text-slate-300 leading-relaxed">
+                                {String(out.contentMarkdown)}
+                              </p>
+                            )}
+                          </div>
+                        )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
