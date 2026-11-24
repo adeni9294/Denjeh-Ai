@@ -168,18 +168,40 @@ export async function generatePlanWithFallback(params: {
   systemPrompt: string;
   userPrompt: string;
   agentCode?: string;
+  preferredModel?: string;
 }): Promise<OrchestratorPlanResult> {
   const effectiveSystemPrompt = params.agentCode
     ? `${params.systemPrompt}\n\n${buildAgentToolInstructionBlock(params.agentCode)}`
     : params.systemPrompt;
 
+  const preferred = params.preferredModel?.trim();
+
   const enabledProviders = params.providers
     .filter((p) => p.is_enabled && p.encrypted_api_key)
-    .sort((a, b) => a.priority_order - b.priority_order);
+    .sort((a, b) => {
+      if (preferred) {
+        const aHasPreferred = params.models.some(
+          (m) =>
+            m.provider_id === a.id &&
+            m.is_active &&
+            m.model_identifier === preferred
+        );
+        const bHasPreferred = params.models.some(
+          (m) =>
+            m.provider_id === b.id &&
+            m.is_active &&
+            m.model_identifier === preferred
+        );
+        if (aHasPreferred !== bHasPreferred) {
+          return aHasPreferred ? -1 : 1;
+        }
+      }
+      return a.priority_order - b.priority_order;
+    });
 
   if (enabledProviders.length === 0) {
     throw new Error(
-      "Belum ada AI Provider aktif dengan API key valid. Silakan atur di menu AI Provider Manager (/providers)."
+      "Belum ada AI Provider aktif dengan API key valid. Silakan atur di menu Memory & Settings (/memory)."
     );
   }
 
@@ -193,14 +215,19 @@ export async function generatePlanWithFallback(params: {
       .filter((m) => m.provider_id === provider.id && m.is_active)
       .sort((a, b) => Number(b.is_default) - Number(a.is_default));
 
-    const candidateModels =
+    const baseCandidates =
       providerModels.length > 0
         ? Array.from(new Set(providerModels.map((m) => m.model_identifier)))
         : [
             provider.provider_key === "groq"
               ? "llama-3.3-70b-versatile"
-              : "gemini-3.8-flash-lite",
+              : "gemini-2.5-flash",
           ];
+
+    const candidateModels =
+      preferred && baseCandidates.includes(preferred)
+        ? [preferred, ...baseCandidates.filter((m) => m !== preferred)]
+        : baseCandidates;
 
     const isGemini =
       provider.provider_key === "gemini" ||
