@@ -29,6 +29,20 @@ type WorkflowRunWithPlan = DbWorkflowRun & {
   plan_json?: Record<string, unknown> | null;
 };
 
+interface PromptCardItem {
+  id: string;
+  taskId: string;
+  projectId: string | null;
+  workflowRunId: string | null;
+  stepOrder: number;
+  clipNumber?: number;
+  isClipMaster: boolean;
+  badgeLabel: string;
+  title: string;
+  subtitle: string;
+  promptText: string;
+}
+
 function getAgentCode(task: TaskWithPayloads): string {
   const payload = (task.input_payload ?? {}) as Record<string, unknown>;
   const out = (task.output_payload ?? {}) as Record<string, unknown>;
@@ -39,14 +53,68 @@ function getAgentCode(task: TaskWithPayloads): string {
     .trim();
 }
 
-function getPromptBody(task: TaskWithPayloads): string {
+function extractClipTitle(promptText: string, fallbackIndex: number): string {
+  const sceneMatch = promptText.match(/SCENE\s*\d+\s*:\s*(.+)/i);
+  const durationMatch = promptText.match(/DURATION\s*:\s*(.+)/i);
+  if (sceneMatch) {
+    const sceneLabel = sceneMatch[1].trim();
+    const durLabel = durationMatch ? ` (${durationMatch[1].trim()})` : "";
+    return `Scene ${String(fallbackIndex).padStart(2, "0")}: ${sceneLabel}${durLabel}`;
+  }
+  return `Clip #${String(fallbackIndex).padStart(2, "0")} — Master Prompt`;
+}
+
+function expandTaskToPromptCards(task: TaskWithPayloads): PromptCardItem[] {
+  const payload = (task.input_payload ?? {}) as Record<string, unknown>;
   const out = (task.output_payload ?? {}) as Record<string, unknown>;
+  const stepOrder = Number(payload.stepOrder ?? task.step_order ?? 1);
+  const code = getAgentCode(task);
+  const agentName = String(payload.agentName || payload.agentCode || "Agent");
+  const rawSteps = Array.isArray(out.steps)
+    ? (out.steps as Record<string, unknown>[])
+    : [];
+
+  if (code === "video" && rawSteps.length > 0) {
+    return rawSteps.map((s, idx) => {
+      const clipNum = Number(s.stepNumber ?? idx + 1);
+      const actionText = String(s.action ?? "").trim();
+      return {
+        id: `${task.id}-clip-${clipNum}-${idx}`,
+        taskId: task.id,
+        projectId: task.project_id ?? null,
+        workflowRunId: task.workflow_run_id ?? null,
+        stepOrder,
+        clipNumber: clipNum,
+        isClipMaster: true,
+        badgeLabel: `Clip #${String(clipNum).padStart(2, "0")} • Master Prompt`,
+        title: extractClipTitle(actionText, clipNum),
+        subtitle: String(out.summary ?? task.title),
+        promptText: actionText,
+      };
+    });
+  }
+
   const summary = String(out.summary ?? "").trim();
   const contentMarkdown = String(out.contentMarkdown ?? "").trim();
-  if (contentMarkdown && summary && contentMarkdown !== summary) {
-    return `${summary}\n\n${contentMarkdown}`;
-  }
-  return contentMarkdown || summary || task.title;
+  const body =
+    contentMarkdown && summary && contentMarkdown !== summary
+      ? `${summary}\n\n${contentMarkdown}`
+      : contentMarkdown || summary || task.title;
+
+  return [
+    {
+      id: task.id,
+      taskId: task.id,
+      projectId: task.project_id ?? null,
+      workflowRunId: task.workflow_run_id ?? null,
+      stepOrder,
+      isClipMaster: code === "video",
+      badgeLabel: code === "video" ? "Master Prompt Klip" : agentName,
+      title: `#${stepOrder} • ${task.title}`,
+      subtitle: String(payload.instruction ?? ""),
+      promptText: body,
+    },
+  ];
 }
 
 function downloadMdFile(filename: string, markdown: string) {
@@ -69,7 +137,7 @@ export function ContentStudioWorkspace() {
   const [tasks, setTasks] = useState<TaskWithPayloads[]>([]);
   const [promptCategory, setPromptCategory] = useState<
     "all" | "clip_master" | "creative_prompt"
-  >("all");
+  >("clip_master");
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [savingMemId, setSavingMemId] = useState<string | null>(null);
   const [savedMemIds, setSavedMemIds] = useState<Record<string, boolean>>({});
@@ -142,7 +210,6 @@ export function ContentStudioWorkspace() {
       setRuns((runsData as DbWorkflowRun[]) ?? []);
       setTasks(sortedTasks);
       setSelectedRunId("all");
-      setPromptCategory("all");
     } catch (err) {
       setErrorMsg(
         err instanceof Error ? err.message : "Gagal memuat data Content Studio."
@@ -196,59 +263,52 @@ export function ContentStudioWorkspace() {
     }
   }, [selectedProject, isLoggedIn, loadStudioData]);
 
-  // Content Studio hanya menyaring blok prompt (mengecualikan agen distribusi/publikasi/audit non-prompt)
+  // Content Studio hanya menampilkan prompt (mengecualikan agen distribusi/audit)
   const promptOnlyTasks = tasks.filter((t) => {
     const code = getAgentCode(t);
     return !["marketing", "publishing", "quality"].includes(code);
   });
 
-  const clipMasterCount = promptOnlyTasks.filter(
-    (t) => getAgentCode(t) === "video"
-  ).length;
+  const allCards = promptOnlyTasks.flatMap(expandTaskToPromptCards);
 
-  const creativePromptCount = promptOnlyTasks.filter(
-    (t) => getAgentCode(t) !== "video"
-  ).length;
+  const clipMasterCards = allCards.filter((c) => c.isClipMaster);
+  const creativePromptCards = allCards.filter((c) => !c.isClipMaster);
 
-  const filteredPrompts = promptOnlyTasks.filter((t) => {
-    if (selectedRunId !== "all" && t.workflow_run_id !== selectedRunId) {
+  const filteredPrompts = allCards.filter((c) => {
+    if (selectedRunId !== "all" && c.workflowRunId !== selectedRunId) {
       return false;
     }
-    const code = getAgentCode(t);
-    if (promptCategory === "clip_master" && code !== "video") {
+    if (promptCategory === "clip_master" && !c.isClipMaster) {
       return false;
     }
-    if (promptCategory === "creative_prompt" && code === "video") {
+    if (promptCategory === "creative_prompt" && c.isClipMaster) {
       return false;
     }
     return true;
   });
 
-  const handleCopy = async (task: TaskWithPayloads) => {
+  const handleCopy = async (card: PromptCardItem) => {
     try {
-      await navigator.clipboard.writeText(getPromptBody(task));
-      setCopiedId(task.id);
+      await navigator.clipboard.writeText(card.promptText);
+      setCopiedId(card.id);
       setTimeout(() => {
-        setCopiedId((prev) => (prev === task.id ? null : prev));
+        setCopiedId((prev) => (prev === card.id ? null : prev));
       }, 2000);
     } catch {
-      setErrorMsg("Gagal menyalin prompt ke clipboard.");
+      setErrorMsg("Gagal menyalin master prompt ke clipboard.");
     }
   };
 
-  const handleDownloadOne = (task: TaskWithPayloads) => {
-    const payload = (task.input_payload ?? {}) as Record<string, unknown>;
-    const stepOrder = Number(payload.stepOrder ?? task.step_order ?? 1);
-    const code = getAgentCode(task) || "prompt";
-    downloadMdFile(
-      `step-${stepOrder}-${code}-master-prompt.md`,
-      `# ${task.title}\n\n${getPromptBody(task)}\n`
-    );
+  const handleDownloadOne = (card: PromptCardItem) => {
+    const slug = card.clipNumber
+      ? `clip-${String(card.clipNumber).padStart(2, "0")}-master-prompt`
+      : `step-${card.stepOrder}-prompt`;
+    downloadMdFile(`${slug}.md`, `# ${card.title}\n\n${card.promptText}\n`);
   };
 
-  const handleSaveToMemory = async (task: TaskWithPayloads) => {
+  const handleSaveToMemory = async (card: PromptCardItem) => {
     if (savingMemId) return;
-    setSavingMemId(task.id);
+    setSavingMemId(card.id);
     setErrorMsg(null);
 
     try {
@@ -258,19 +318,16 @@ export function ContentStudioWorkspace() {
       } = await supabase.auth.getUser();
       if (!user) return;
 
-      const payload = (task.input_payload ?? {}) as Record<string, unknown>;
-      const stepOrder = Number(payload.stepOrder ?? task.step_order ?? 1);
-      const code = (getAgentCode(task) || "prompt").replace(
-        /[^a-z0-9-_]+/g,
-        "_"
-      );
+      const memKey = card.clipNumber
+        ? `clip_${String(card.clipNumber).padStart(2, "0")}_master_${card.taskId.slice(0, 6)}`
+        : `prompt_${card.stepOrder}_${card.taskId.slice(0, 6)}`;
 
       const { error } = await supabase.from("memories").insert({
         user_id: user.id,
-        project_id: task.project_id || selectedProject || null,
+        project_id: card.projectId || selectedProject || null,
         scope: "project",
-        memory_key: `prompt_${stepOrder}_${code}_${task.id.slice(0, 6)}`,
-        content: getPromptBody(task).slice(0, 3500),
+        memory_key: memKey,
+        content: card.promptText.slice(0, 3500),
         importance: 8,
       });
 
@@ -279,10 +336,10 @@ export function ContentStudioWorkspace() {
         return;
       }
 
-      setSavedMemIds((prev) => ({ ...prev, [task.id]: true }));
+      setSavedMemIds((prev) => ({ ...prev, [card.id]: true }));
     } catch (err) {
       setErrorMsg(
-        err instanceof Error ? err.message : "Gagal menyimpan prompt ke memori."
+        err instanceof Error ? err.message : "Gagal menyimpan ke memori."
       );
     } finally {
       setSavingMemId(null);
@@ -293,15 +350,13 @@ export function ContentStudioWorkspace() {
     if (filteredPrompts.length === 0) return;
     const activeProj = projects.find((p) => p.id === selectedProject);
     const projTitle = activeProj?.name || "Proyek";
-    const sections = filteredPrompts.map((t) => {
-      const payload = (t.input_payload ?? {}) as Record<string, unknown>;
-      const stepOrder = Number(payload.stepOrder ?? t.step_order ?? 1);
-      return `## #${stepOrder} • ${t.title}\n\n${getPromptBody(t)}`;
-    });
+    const sections = filteredPrompts.map(
+      (c) => `## ${c.title}\n\n${c.promptText}`
+    );
 
     downloadMdFile(
       "content-studio-master-prompts.md",
-      `# Content Studio (Prompt Only) — ${projTitle}\n\n${sections.join(
+      `# Master Prompt Katalog — ${projTitle}\n\n${sections.join(
         "\n\n---\n\n"
       )}\n`
     );
@@ -312,8 +367,8 @@ export function ContentStudioWorkspace() {
       {isLoggedIn === false && (
         <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-xs text-amber-300 flex flex-wrap items-center justify-between gap-2">
           <span>
-            Anda belum login. Silakan masuk untuk melihat daftar prompt di
-            Content Studio.
+            Anda belum login. Silakan masuk untuk melihat daftar Master Prompt
+            per klip di Content Studio.
           </span>
           <Link
             href="/login"
@@ -378,17 +433,6 @@ export function ContentStudioWorkspace() {
           <div className="inline-flex rounded-xl border border-slate-700 bg-slate-900/80 p-1 text-xs">
             <button
               type="button"
-              onClick={() => setPromptCategory("all")}
-              className={`rounded-lg px-2.5 py-1 font-medium transition ${
-                promptCategory === "all"
-                  ? "bg-blue-600 text-white"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              Semua Prompt
-            </button>
-            <button
-              type="button"
               onClick={() => setPromptCategory("clip_master")}
               className={`rounded-lg px-2.5 py-1 font-medium transition ${
                 promptCategory === "clip_master"
@@ -396,7 +440,7 @@ export function ContentStudioWorkspace() {
                   : "text-slate-400 hover:text-white"
               }`}
             >
-              Master Prompt Klip
+              Master Prompt Klip ({clipMasterCards.length})
             </button>
             <button
               type="button"
@@ -407,7 +451,18 @@ export function ContentStudioWorkspace() {
                   : "text-slate-400 hover:text-white"
               }`}
             >
-              Prompt Dasar
+              Prompt Dasar ({creativePromptCards.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setPromptCategory("all")}
+              className={`rounded-lg px-2.5 py-1 font-medium transition ${
+                promptCategory === "all"
+                  ? "bg-blue-600 text-white"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              Semua ({allCards.length})
             </button>
           </div>
         </div>
@@ -420,7 +475,7 @@ export function ContentStudioWorkspace() {
               className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:opacity-95"
             >
               <Download className="h-3.5 w-3.5" />
-              <span>Unduh Prompt (.md)</span>
+              <span>Unduh Semua (.md)</span>
             </button>
           )}
           <Link
@@ -432,41 +487,43 @@ export function ContentStudioWorkspace() {
         </div>
       </div>
 
-      {/* Ringkasan Prompt */}
+      {/* Ringkasan */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div className="glass-panel rounded-2xl p-4">
           <div className="flex items-center gap-2 text-xs text-slate-400">
-            <Layers className="h-4 w-4 text-blue-400" />
-            <span>Total Prompt Aktif</span>
-          </div>
-          <p className="mt-1.5 text-2xl font-bold">{filteredPrompts.length}</p>
-        </div>
-        <div className="glass-panel rounded-2xl p-4">
-          <div className="flex items-center gap-2 text-xs text-slate-400">
             <Film className="h-4 w-4 text-purple-400" />
-            <span>Master Prompt Klip (Video)</span>
+            <span>Master Prompt Per Klip</span>
           </div>
-          <p className="mt-1.5 text-2xl font-bold">{clipMasterCount}</p>
+          <p className="mt-1.5 text-2xl font-bold">{clipMasterCards.length}</p>
         </div>
         <div className="glass-panel rounded-2xl p-4">
           <div className="flex items-center gap-2 text-xs text-slate-400">
             <FileText className="h-4 w-4 text-emerald-400" />
-            <span>Prompt Dasar (Cerita/Visual)</span>
+            <span>Prompt Cerita / Karakter / Visual</span>
           </div>
-          <p className="mt-1.5 text-2xl font-bold">{creativePromptCount}</p>
+          <p className="mt-1.5 text-2xl font-bold">
+            {creativePromptCards.length}
+          </p>
+        </div>
+        <div className="glass-panel rounded-2xl p-4">
+          <div className="flex items-center gap-2 text-xs text-slate-400">
+            <Layers className="h-4 w-4 text-blue-400" />
+            <span>Total Kartu Ditampilkan</span>
+          </div>
+          <p className="mt-1.5 text-2xl font-bold">{filteredPrompts.length}</p>
         </div>
       </div>
 
-      {/* Daftar Prompt Utuh */}
+      {/* Katalog Master Prompt Utuh */}
       <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <div className="flex items-center gap-2">
             <Sparkles className="h-4 w-4 text-purple-400" />
             <h2 className="text-base font-semibold">
-              Katalog Prompt Utuh ({filteredPrompts.length})
+              Katalog Master Prompt Utuh Per Klip ({filteredPrompts.length})
             </h2>
           </div>
-          <Badge variant="purple">Prompt Only • Tanpa Media</Badge>
+          <Badge variant="purple">1 Master Prompt Utuh / Klip</Badge>
         </div>
 
         {loading ? (
@@ -474,79 +531,72 @@ export function ContentStudioWorkspace() {
         ) : filteredPrompts.length === 0 ? (
           <div className="py-8 text-center space-y-2">
             <p className="text-xs text-slate-400">
-              Belum ada prompt selesai untuk filter yang dipilih.
+              Belum ada Master Prompt klip selesai untuk filter yang dipilih.
             </p>
             <Link
               href="/command-center"
               className="inline-block text-xs text-blue-400 hover:underline"
             >
-              Jalankan agen di AI Command Center terlebih dahulu →
+              Jalankan Video Agent di AI Command Center terlebih dahulu →
             </Link>
           </div>
         ) : (
           <div className="space-y-3">
-            {filteredPrompts.map((t) => {
-              const payload = (t.input_payload ?? {}) as Record<string, unknown>;
-              const stepOrder = Number(payload.stepOrder ?? t.step_order ?? 1);
-              const code = getAgentCode(t);
-              const isClipMaster = code === "video";
-              const agentName = String(
-                payload.agentName || payload.agentCode || "Agent"
-              );
-              const isCopied = copiedId === t.id;
-              const isSaving = savingMemId === t.id;
-              const isSaved = Boolean(savedMemIds[t.id]);
+            {filteredPrompts.map((card) => {
+              const isCopied = copiedId === card.id;
+              const isSaving = savingMemId === card.id;
+              const isSaved = Boolean(savedMemIds[card.id]);
 
               return (
                 <div
-                  key={t.id}
+                  key={card.id}
                   className="rounded-2xl border border-slate-200/80 dark:border-studio-border bg-slate-50/70 dark:bg-studio-navy/80 p-4 space-y-2.5 text-xs"
                 >
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                     <div className="space-y-1">
                       <div className="flex flex-wrap items-center gap-2 font-semibold">
-                        <span>
-                          #{stepOrder} • {t.title}
-                        </span>
-                        <Badge variant={isClipMaster ? "purple" : "blue"}>
-                          {isClipMaster ? "Master Prompt Klip" : agentName}
+                        <span className="text-sm">{card.title}</span>
+                        <Badge variant={card.isClipMaster ? "purple" : "blue"}>
+                          {card.badgeLabel}
                         </Badge>
                       </div>
-                      <p className="text-[11px] text-slate-400">
-                        {String(payload.instruction ?? "")}
-                      </p>
+                      {card.subtitle && (
+                        <p className="text-[11px] text-slate-400">
+                          {card.subtitle}
+                        </p>
+                      )}
                     </div>
 
                     <div className="flex items-center gap-1.5 flex-wrap shrink-0">
                       <button
                         type="button"
-                        onClick={() => handleCopy(t)}
-                        className="inline-flex items-center gap-1 rounded-lg border border-slate-600/40 bg-slate-800/70 px-2.5 py-1 text-[11px] text-slate-200 hover:bg-slate-700/70"
+                        onClick={() => handleCopy(card)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-purple-500/40 bg-purple-600/20 px-2.5 py-1 text-[11px] font-medium text-purple-200 hover:bg-purple-600/30"
                       >
                         {isCopied ? (
                           <>
                             <Check className="h-3 w-3 text-emerald-400" />
-                            <span>Tersalin</span>
+                            <span>Master Prompt Tersalin</span>
                           </>
                         ) : (
                           <>
-                            <Copy className="h-3 w-3 text-blue-400" />
-                            <span>Salin Prompt</span>
+                            <Copy className="h-3 w-3 text-purple-300" />
+                            <span>Salin Master Prompt</span>
                           </>
                         )}
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleDownloadOne(t)}
+                        onClick={() => handleDownloadOne(card)}
                         className="inline-flex items-center gap-1 rounded-lg border border-slate-600/40 bg-slate-800/70 px-2.5 py-1 text-[11px] text-slate-200 hover:bg-slate-700/70"
                       >
-                        <Download className="h-3 w-3 text-purple-400" />
+                        <Download className="h-3 w-3 text-blue-400" />
                         <span>.md</span>
                       </button>
                       <button
                         type="button"
                         disabled={isSaving || isSaved}
-                        onClick={() => handleSaveToMemory(t)}
+                        onClick={() => handleSaveToMemory(card)}
                         className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/30 bg-emerald-600/20 px-2.5 py-1 text-[11px] text-emerald-300 hover:bg-emerald-600/30 disabled:opacity-60"
                       >
                         <BookmarkPlus className="h-3 w-3" />
@@ -561,9 +611,9 @@ export function ContentStudioWorkspace() {
                     </div>
                   </div>
 
-                  <div className="rounded-xl border border-slate-700/50 bg-slate-900/60 p-3 whitespace-pre-line text-slate-200 leading-relaxed">
-                    {getPromptBody(t)}
-                  </div>
+                  <pre className="rounded-xl border border-slate-700/50 bg-slate-950/75 p-3.5 whitespace-pre-wrap font-mono text-[11px] text-slate-200 leading-relaxed overflow-x-auto">
+                    {card.promptText}
+                  </pre>
                 </div>
               );
             })}
