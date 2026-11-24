@@ -8,7 +8,7 @@ import {
 import { DbAiModel, DbAiProvider, DbMemory, DbProject } from "@/types/studio";
 
 export async function POST(
-  _req: NextRequest,
+  req: NextRequest,
   context: { params: Promise<{ taskId: string }> }
 ) {
   let resolvedTaskId = "";
@@ -22,6 +22,16 @@ export async function POST(
         { error: "ID tugas tidak valid." },
         { status: 400 }
       );
+    }
+
+    let preferredModel: string | undefined;
+    try {
+      const body = (await req.json()) as { preferredModel?: string };
+      if (body?.preferredModel) {
+        preferredModel = String(body.preferredModel).trim();
+      }
+    } catch {
+      // Body kosong diabaikan
     }
 
     const supabase = await createSupabaseServerClient();
@@ -196,6 +206,7 @@ ${estimatedOutput}`;
       models: (models as DbAiModel[]) ?? [],
       systemPrompt,
       userPrompt,
+      preferredModel,
     });
 
     const formattedStepsText = result.steps
