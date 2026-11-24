@@ -63,7 +63,10 @@ export async function POST(req: NextRequest) {
       const { data: memRows } = await supabase
         .from("memories")
         .select("*")
-        .or(`project_id.eq.${body.projectId},and(scope.eq.user,project_id.is.null)`)
+        .eq("user_id", user.id)
+        .or(
+          `project_id.eq.${body.projectId},and(scope.eq.user,project_id.is.null)`
+        )
         .order("importance", { ascending: false })
         .limit(20);
       memories = (memRows as DbMemory[]) ?? [];
@@ -88,10 +91,14 @@ Daftar agen resmi yang tersedia:
 - story (Story Agent): naskah, narasi, struktur cerita
 - character (Character Agent): profil karakter & kontinuitas
 - visual (Visual Agent): arahan visual & image prompt
-- video (Video Agent): storyboard, shot list, video prompt per klip
+- video (Video Agent): menyusun 1 master prompt utuh per klip (menggabungkan cerita/adegan, lokasi, karakter & kontinuitas, aksi per detik di klip tersebut, pencahayaan/kamera, serta dialog) dengan durasi yang patuh ketat pada instruksi pengguna
 - marketing (Marketing Agent): caption, hashtag, jadwal distribusi
 - publishing (Publishing Agent): kesiapan rilis platform sosial
 - quality (Quality Agent): evaluasi kualitas & audit kontinuitas sebelum selesai
+
+ATURAN WAJIB KEPATUHAN DURASI & MASTER PROMPT KLIP:
+1. Jika pengguna menetapkan durasi spesifik per klip (misalnya "setiap klip 10s" atau "10 detik"), WAJIB terapkan durasi yang sama persis pada setiap klip (misal 0-10s, 10-20s, 20-30s, dst.) dan sesuaikan jumlah klip dengan total durasi yang diminta. DILARANG mencampur durasi berbeda (seperti 10s dan 12s) kecuali pengguna secara eksplisit meminta durasi bervariasi.
+2. Pada langkah Video Agent, instruksikan agar setiap klip disajikan sebagai SATU master prompt utuh yang menyatukan cerita/adegan, lokasi, karakter/kostum, rincian aksi per detik di dalam klip tersebut, sudut kamera/pencahayaan, serta dialog (bukan dipecah menjadi prompt terpisah per elemen).
 
 WAJIB kembalikan JSON valid dengan skema persis seperti ini (bahasa Indonesia untuk deskripsi langkah):
 {
@@ -112,14 +119,19 @@ WAJIB kembalikan JSON valid dengan skema persis seperti ini (bahasa Indonesia un
     const memoryText =
       memories.length > 0
         ? memories
-            .map((m) => `- [${m.scope.toUpperCase()}] ${m.memory_key}: ${m.content}`)
+            .map(
+              (m) =>
+                `- [${m.scope.toUpperCase()}] ${m.memory_key}: ${m.content}`
+            )
             .join("\n")
         : "- Belum ada memori tersimpan untuk proyek ini.";
 
     const attachmentText =
       body.attachments && body.attachments.length > 0
         ? body.attachments
-            .map((a) => `- ${a.name} (${a.type})${a.note ? `: ${a.note}` : ""}`)
+            .map(
+              (a) => `- ${a.name} (${a.type})${a.note ? `: ${a.note}` : ""}`
+            )
             .join("\n")
         : "- Tidak ada lampiran.";
 
@@ -134,8 +146,11 @@ ${memoryText}
 LAMPIRAN / REFERENSI:
 ${attachmentText}
 
-${body.previousPlanSummary ? `KONTEKS RENCANA SEBELUMNYA (UNTUK REVISI LANJUTAN):\n${body.previousPlanSummary}\n` : ""}
-INSTRUKSI PENGGUNA:
+${
+  body.previousPlanSummary
+    ? `KONTEKS RENCANA SEBELUMNYA (UNTUK REVISI LANJUTAN):\n${body.previousPlanSummary}\n`
+    : ""
+}INSTRUKSI PENGGUNA (PATUHI ANGKA DURASI KLIP SECARA KONSISTEN):
 ${instruction}`;
 
     // 3. Panggil AI Cloud
