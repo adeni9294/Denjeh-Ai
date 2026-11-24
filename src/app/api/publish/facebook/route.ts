@@ -2,8 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 type PublishChannelType = "reels" | "photo" | "text";
+type PublishActionType = "publish" | "save_credentials" | "clear_credentials";
 
 interface FacebookPublishRequest {
+  action?: PublishActionType;
   projectId?: string | null;
   taskId?: string | null;
   pageId?: string;
@@ -39,6 +41,98 @@ export async function POST(req: NextRequest) {
     }
 
     const body = (await req.json()) as FacebookPublishRequest;
+    const action: PublishActionType = body.action ?? "publish";
+
+    // Aksi khusus: hapus kredensial tersimpan
+    if (action === "clear_credentials") {
+      await supabase
+        .from("memories")
+        .delete()
+        .eq("user_id", user.id)
+        .eq("scope", "user")
+        .eq("memory_key", "fb_page_credentials");
+
+      return NextResponse.json({
+        ok: true,
+        message: "Kredensial Facebook Page dihapus.",
+      });
+    }
+
+    // Aksi khusus: simpan kredensial saja
+    if (action === "save_credentials") {
+      const pageIdToSave = (body.pageId ?? "").trim();
+      let tokenToSave = (body.accessToken ?? "").trim();
+
+      if (!pageIdToSave) {
+        return NextResponse.json(
+          { error: "Facebook Page ID wajib diisi." },
+          { status: 400 }
+        );
+      }
+
+      if (!tokenToSave) {
+        const { data: existingCred } = await supabase
+          .from("memories")
+          .select("content")
+          .eq("user_id", user.id)
+          .eq("scope", "user")
+          .eq("memory_key", "fb_page_credentials")
+          .maybeSingle();
+
+        if (existingCred?.content) {
+          try {
+            const parsed = JSON.parse(String(existingCred.content)) as {
+              accessToken?: string;
+            };
+            if (parsed.accessToken) tokenToSave = parsed.accessToken.trim();
+          } catch {
+            // Abaikan JSON tidak valid
+          }
+        }
+      }
+
+      if (!tokenToSave) {
+        return NextResponse.json(
+          { error: "Page Access Token wajib diisi." },
+          { status: 400 }
+        );
+      }
+
+      const payloadJson = JSON.stringify({
+        pageId: pageIdToSave,
+        accessToken: tokenToSave,
+      });
+
+      const { data: existingRow } = await supabase
+        .from("memories")
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("scope", "user")
+        .eq("memory_key", "fb_page_credentials")
+        .maybeSingle();
+
+      if (existingRow?.id) {
+        await supabase
+          .from("memories")
+          .update({ content: payloadJson, importance: 9 })
+          .eq("id", existingRow.id);
+      } else {
+        await supabase.from("memories").insert({
+          user_id: user.id,
+          project_id: null,
+          scope: "user",
+          memory_key: "fb_page_credentials",
+          content: payloadJson,
+          importance: 9,
+        });
+      }
+
+      return NextResponse.json({
+        ok: true,
+        message: "Facebook Page ID & Access Token berhasil disimpan.",
+      });
+    }
+
     const publishType: PublishChannelType =
       body.publishType === "reels" || body.publishType === "photo"
         ? body.publishType
@@ -50,7 +144,6 @@ export async function POST(req: NextRequest) {
     let pageId = (body.pageId ?? "").trim();
     let accessToken = (body.accessToken ?? "").trim();
 
-    // Ambil kredensial tersimpan dari memories jika input kosong
     if (!pageId || !accessToken) {
       const { data: credRow } = await supabase
         .from("memories")
@@ -86,7 +179,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Simpan kredensial jika diminta
     if (body.saveCredentials) {
       const payloadJson = JSON.stringify({ pageId, accessToken });
       const { data: existingCred } = await supabase
@@ -191,7 +283,6 @@ export async function POST(req: NextRequest) {
 
     const publishedPostId = fbData.post_id || fbData.id || "published";
 
-    // Catat riwayat rilis di checkpoint_state task bila taskId disertakan
     if (body.taskId) {
       const { data: existingTask } = await supabase
         .from("tasks")
