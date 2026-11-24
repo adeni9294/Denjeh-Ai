@@ -44,7 +44,10 @@ function extractJsonObject(rawText: string): Record<string, unknown> {
     throw new Error("Respons AI tidak memuat struktur JSON yang valid.");
   }
 
-  return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1)) as Record<string, unknown>;
+  return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1)) as Record<
+    string,
+    unknown
+  >;
 }
 
 function sleep(ms: number) {
@@ -58,9 +61,9 @@ async function callGeminiEndpoint(params: {
   systemPrompt: string;
   userPrompt: string;
 }) {
-  const endpoint = `${params.baseUrl.replace(/\/$/, "")}/models/${params.model}:generateContent?key=${encodeURIComponent(
-    params.apiKey
-  )}`;
+  const endpoint = `${params.baseUrl.replace(/\/$/, "")}/models/${
+    params.model
+  }:generateContent?key=${encodeURIComponent(params.apiKey)}`;
 
   let lastErr: Error | null = null;
 
@@ -88,7 +91,10 @@ async function callGeminiEndpoint(params: {
     if (res.ok) {
       const data = (await res.json()) as {
         candidates?: { content?: { parts?: { text?: string }[] } }[];
-        usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+        usageMetadata?: {
+          promptTokenCount?: number;
+          candidatesTokenCount?: number;
+        };
       };
 
       const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
@@ -161,7 +167,12 @@ export async function generatePlanWithFallback(params: {
   models: DbAiModel[];
   systemPrompt: string;
   userPrompt: string;
+  agentCode?: string;
 }): Promise<OrchestratorPlanResult> {
+  const effectiveSystemPrompt = params.agentCode
+    ? `${params.systemPrompt}\n\n${buildAgentToolInstructionBlock(params.agentCode)}`
+    : params.systemPrompt;
+
   const enabledProviders = params.providers
     .filter((p) => p.is_enabled && p.encrypted_api_key)
     .sort((a, b) => a.priority_order - b.priority_order);
@@ -208,14 +219,14 @@ export async function generatePlanWithFallback(params: {
               apiKey,
               baseUrl,
               model: chosenModel,
-              systemPrompt: params.systemPrompt,
+              systemPrompt: effectiveSystemPrompt,
               userPrompt: params.userPrompt,
             })
           : await callOpenAiCompatibleEndpoint({
               apiKey,
               baseUrl,
               model: chosenModel,
-              systemPrompt: params.systemPrompt,
+              systemPrompt: effectiveSystemPrompt,
               userPrompt: params.userPrompt,
             });
 
@@ -226,23 +237,31 @@ export async function generatePlanWithFallback(params: {
           throw new Error("AI mengembalikan rencana kosong (0 langkah).");
         }
 
-        const normalizedSteps: GeneratedPlanStep[] = rawSteps.map((item, index) => {
-          const row = item as Record<string, unknown>;
-          return {
-            stepNumber: Number(row.stepNumber ?? index + 1),
-            agentCode: String(row.agentCode ?? "story"),
-            agentName: String(row.agentName ?? "Story Agent"),
-            action: String(row.action ?? "Menyusun bagian konten sesuai instruksi."),
-            dependsOn: String(
-              row.dependsOn ?? (index === 0 ? "Project Memory" : `Step ${index}`)
-            ),
-            estimatedOutput: String(row.estimatedOutput ?? "Artefak Terstruktur"),
-          };
-        });
+        const normalizedSteps: GeneratedPlanStep[] = rawSteps.map(
+          (item, index) => {
+            const row = item as Record<string, unknown>;
+            return {
+              stepNumber: Number(row.stepNumber ?? index + 1),
+              agentCode: String(row.agentCode ?? "story"),
+              agentName: String(row.agentName ?? "Story Agent"),
+              action: String(
+                row.action ?? "Menyusun bagian konten sesuai instruksi."
+              ),
+              dependsOn: String(
+                row.dependsOn ??
+                  (index === 0 ? "Project Memory" : `Step ${index}`)
+              ),
+              estimatedOutput: String(
+                row.estimatedOutput ?? "Artefak Terstruktur"
+              ),
+            };
+          }
+        );
 
         return {
           intentSummary: String(
-            parsed.intentSummary ?? "Rencana eksekusi multi-agen berhasil disusun."
+            parsed.intentSummary ??
+              "Rencana eksekusi multi-agen berhasil disusun."
           ),
           recommendedMode:
             parsed.recommendedMode === "autonomous" ? "autonomous" : "manual",
@@ -262,5 +281,7 @@ export async function generatePlanWithFallback(params: {
     }
   }
 
-  throw new Error(`Semua provider AI gagal merespons. Detail: ${errors.join(" | ")}`);
+  throw new Error(
+    `Semua provider AI gagal merespons. Detail: ${errors.join(" | ")}`
+  );
 }
