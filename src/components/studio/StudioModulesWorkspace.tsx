@@ -239,26 +239,51 @@ export function StudioModulesWorkspace({
         <div className="glass-panel rounded-2xl p-6 text-xs text-slate-400">
           Memuat data modul...
         </div>
-      ) : moduleKey === "agents" ? (
+     ) : moduleKey === "agents" ? (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {AGENT_ROSTER.map((ag) => (
+          {MULTI_AGENT_SPECIALISTS.map((ag) => (
             <div
               key={ag.code}
               className="glass-panel rounded-2xl p-4 space-y-2.5 text-xs"
             >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 font-semibold text-sm">
-                  <Bot className="h-4 w-4 text-purple-400" />
-                  <span>{ag.name}</span>
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <div className="flex items-center gap-2 font-semibold text-sm">
+                    <Bot className="h-4 w-4 text-purple-400" />
+                    <span>{ag.name}</span>
+                  </div>
+                  <p className="text-[11px] text-blue-300 mt-0.5">{ag.title}</p>
                 </div>
-                <Badge variant="purple">{ag.code}</Badge>
+                <Badge variant="purple">{ag.preferredTier}</Badge>
               </div>
+
               <p className="text-slate-300 leading-relaxed">{ag.role}</p>
-              <div className="flex items-center justify-between pt-1">
+
+              <div className="space-y-1">
+                <p className="text-[11px] font-medium text-slate-400">
+                  Izin Tools ({ag.allowedTools.length}):
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {ag.allowedTools.map((toolId) => {
+                    const toolDef = AGENT_TOOL_REGISTRY[toolId];
+                    return (
+                      <span
+                        key={toolId}
+                        title={toolDef.description}
+                        className="rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-[10px] font-medium text-blue-300"
+                      >
+                        {toolDef.name}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between pt-1.5 border-t border-slate-800">
                 <button
                   type="button"
                   onClick={() => handleCopyText(ag.code, ag.defaultPrompt)}
-                  className="inline-flex items-center gap-1 rounded-lg border border-slate-600/40 bg-slate-800/70 px-2.5 py-1 text-[11px] text-slate-200"
+                  className="inline-flex items-center gap-1 rounded-lg border border-slate-600/40 bg-slate-800/70 px-2.5 py-1 text-[11px] text-slate-200 hover:bg-slate-700/70"
                 >
                   {copiedKey === ag.code ? (
                     <>
