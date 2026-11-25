@@ -26,6 +26,7 @@ import {
   CheckCircle2,
   AlertCircle,
   Zap,
+  Play,
 } from "lucide-react";
 
 export type StudioModuleKey =
@@ -108,6 +109,9 @@ export function StudioModulesWorkspace({
     message: string;
   } | null>(null);
   const [publishingTaskId, setPublishingTaskId] = useState<string | null>(null);
+  const [runningAutoTaskId, setRunningAutoTaskId] = useState<string | null>(
+    null
+  );
   const [publishFeedback, setPublishFeedback] = useState<
     Record<string, { ok: boolean; message: string }>
   >({});
@@ -385,7 +389,7 @@ export function StudioModulesWorkspace({
       caption: String(
         cp.caption || out.contentMarkdown || out.summary || t.title
       ),
-      autoPublishOnRender: Boolean(cp.autoPublishFacebook),
+      autoPublishOnRender: Boolean(cp.autoPublishFacebook ?? true),
     };
   };
 
@@ -433,8 +437,8 @@ export function StudioModulesWorkspace({
         [t.id]: {
           ok: true,
           message: nextAuto
-            ? "Auto-Publish saat Render Selesai aktif. Kirim hasil render ke /api/render/callback untuk posting otomatis."
-            : "Auto-Publish saat Render Selesai dinonaktifkan.",
+            ? "Mode otomatis aktif: saat callback render masuk atau dijalankan, posting ke Facebook berjalan otomatis."
+            : "Mode otomatis dimatikan untuk tugas ini.",
         },
       }));
     } catch {
@@ -442,8 +446,120 @@ export function StudioModulesWorkspace({
     }
   };
 
+  // Jalankan alur otomatis langsung dari dalam aplikasi via /api/publish/facebook (dengan kredensial tersimpan & simpan payload render)
+  const handleRunAutomatedPipelineFromApp = async (
+    t: TaskWithPayloads,
+    item: PublishItemState
+  ) => {
+    if (runningAutoTaskId || publishingTaskId) return;
+    setRunningAutoTaskId(t.id);
+    setPublishFeedback((prev) => {
+      const copy = { ...prev };
+      delete copy[t.id];
+      return copy;
+    });
+
+    try {
+      const supabase = createSupabaseBrowserClient();
+      const prevCp =
+        t.checkpoint_state && typeof t.checkpoint_state === "object"
+          ? (t.checkpoint_state as Record<string, unknown>)
+          : {};
+
+      await supabase
+        .from("tasks")
+        .update({
+          checkpoint_state: {
+            ...prevCp,
+            renderStatus: "completed",
+            renderedAt: new Date().toISOString(),
+            autoPublishFacebook: item.autoPublishOnRender,
+            publishType: item.publishType,
+            videoUrl: item.videoUrl,
+            photoUrl: item.photoUrl,
+            caption: item.caption,
+          },
+        })
+        .eq("id", t.id);
+
+      if (!item.autoPublishOnRender) {
+        setPublishFeedback((prev) => ({
+          ...prev,
+          [t.id]: {
+            ok: true,
+            message:
+              "Data render tersimpan (Render Selesai). Aktifkan Auto-Render→FB: ON atau klik Auto-Post Facebook untuk mempublikasikan.",
+          },
+        }));
+        await loadData(selectedProject);
+        return;
+      }
+
+      const res = await fetch("/api/publish/facebook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: t.project_id || selectedProject || null,
+          taskId: t.id,
+          pageId: fbPageId,
+          accessToken: fbAccessToken,
+          publishType: item.publishType,
+          caption: item.caption,
+          videoUrl: item.videoUrl,
+          photoUrl: item.photoUrl,
+          saveCredentials: Boolean(fbPageId && fbAccessToken),
+        }),
+      });
+
+      const data = (await res.json()) as {
+        ok?: boolean;
+        postId?: string;
+        error?: string;
+      };
+
+      if (!res.ok || !data.ok) {
+        setPublishFeedback((prev) => ({
+          ...prev,
+          [t.id]: {
+            ok: false,
+            message:
+              data.error || "Alur otomatis gagal memposting ke Facebook Page.",
+          },
+        }));
+        return;
+      }
+
+      if (fbPageId && fbAccessToken) {
+        setHasSavedFbCreds(true);
+        setFbAccessToken("");
+      }
+
+      setPublishFeedback((prev) => ({
+        ...prev,
+        [t.id]: {
+          ok: true,
+          message: `Alur otomatis sukses: render dicatat & diposting ke Facebook Page (ID: ${data.postId})`,
+        },
+      }));
+      await loadData(selectedProject);
+    } catch (err) {
+      setPublishFeedback((prev) => ({
+        ...prev,
+        [t.id]: {
+          ok: false,
+          message:
+            err instanceof Error
+              ? err.message
+              : "Gagal menjalankan alur otomatis dari aplikasi.",
+        },
+      }));
+    } finally {
+      setRunningAutoTaskId(null);
+    }
+  };
+
   const handleFacebookAutoPost = async (t: TaskWithPayloads) => {
-    if (publishingTaskId) return;
+    if (publishingTaskId || runningAutoTaskId) return;
     const item = getPublishItemState(t);
     setPublishingTaskId(t.id);
     setPublishFeedback((prev) => {
@@ -838,12 +954,13 @@ export function StudioModulesWorkspace({
             <div className="flex items-center justify-between flex-wrap gap-2">
               <div>
                 <h2 className="text-base font-semibold">
-                  Koneksi Facebook Page Graph API
+                  Koneksi Facebook Page Graph API & Otomatisasi App
                 </h2>
                 <p className="text-xs text-slate-400">
-                  Publikasikan paket 3 output (Video Reels, Foto, dan Teks
-                  Caption) langsung ke Facebook Page atau otomatis saat hasil
-                  render masuk ke <code className="text-blue-300">/api/render/callback</code>.
+                  Jalankan alur otomatis (simpan hasil render + posting Video
+                  Reels, Foto, atau Teks ke Facebook Page) langsung dari
+                  aplikasi DENJEH AI atau via webhook{" "}
+                  <code className="text-blue-300">/api/render/callback</code>.
                 </p>
               </div>
               <Badge variant={hasSavedFbCreds ? "emerald" : "amber"}>
@@ -942,7 +1059,11 @@ export function StudioModulesWorkspace({
                   const item = getPublishItemState(t);
                   const feedback = publishFeedback[t.id];
                   const isPublishingThis = publishingTaskId === t.id;
-                  const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
+                  const isRunningAutoThis = runningAutoTaskId === t.id;
+                  const cp = (t.checkpoint_state ?? {}) as Record<
+                    string,
+                    unknown
+                  >;
                   const publishedId = String(cp.facebookPostId ?? "");
                   const renderStatus = String(cp.renderStatus ?? "");
 
@@ -1013,6 +1134,22 @@ export function StudioModulesWorkspace({
 
                           <button
                             type="button"
+                            disabled={isRunningAutoThis || isPublishingThis}
+                            onClick={() =>
+                              handleRunAutomatedPipelineFromApp(t, item)
+                            }
+                            className="inline-flex items-center gap-1 rounded-lg bg-purple-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-purple-500 disabled:opacity-50"
+                          >
+                            <Play className="h-3 w-3" />
+                            <span>
+                              {isRunningAutoThis
+                                ? "Menjalankan..."
+                                : "Jalankan Otomatis"}
+                            </span>
+                          </button>
+
+                          <button
+                            type="button"
                             onClick={() => handleCopyText(t.id, item.caption)}
                             className="inline-flex items-center gap-1 rounded-lg border border-slate-600/40 bg-slate-800/70 px-2.5 py-1 text-[11px] text-slate-200 hover:bg-slate-700/70"
                           >
@@ -1031,7 +1168,7 @@ export function StudioModulesWorkspace({
 
                           <button
                             type="button"
-                            disabled={isPublishingThis}
+                            disabled={isPublishingThis || isRunningAutoThis}
                             onClick={() => handleFacebookAutoPost(t)}
                             className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
                           >
