@@ -79,6 +79,23 @@ const FALLBACK_MODEL_OPTIONS = [
   { id: "llama-3.1-8b-instant", label: "Llama 3.1 8B Instant (Groq)" },
 ];
 
+// Filter otomatis untuk menghapus accessToken, blok prepare_facebook_page_payload, dan pesan (#200)
+function sanitizeCaptionText(raw: string, fallbackTitle: string): string {
+  const cleaned = raw
+    .replace(/["']?accessToken["']?\s*:\s*["'][^"']*["']?,?/gi, "")
+    .replace(/access_token\s*=\s*[^\s&"']+/gi, "")
+    .replace(/EAA[A-Za-z0-9_-]{15,}/g, "")
+    .replace(
+      /\d+\.\s*\[Publishing Agent\]\s*prepare_facebook_page_payload\s*\{[\s\S]*?\}\s*/gi,
+      ""
+    )
+    .replace(/\(#200\)[\s\S]*$/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  return cleaned || fallbackTitle;
+}
+
 export function StudioModulesWorkspace({
   moduleKey,
 }: {
@@ -382,13 +399,15 @@ export function StudioModulesWorkspace({
         ? cp.publishType
         : fallbackType;
 
+    const rawCaption = String(
+      cp.caption || out.contentMarkdown || out.summary || t.title
+    );
+
     return {
       publishType: cpType,
       videoUrl: String(cp.videoUrl ?? ""),
       photoUrl: String(cp.photoUrl ?? ""),
-      caption: String(
-        cp.caption || out.contentMarkdown || out.summary || t.title
-      ),
+      caption: sanitizeCaptionText(rawCaption, t.title),
       autoPublishOnRender: Boolean(cp.autoPublishFacebook ?? true),
     };
   };
@@ -409,7 +428,11 @@ export function StudioModulesWorkspace({
     item: PublishItemState
   ) => {
     const nextAuto = !item.autoPublishOnRender;
-    updatePublishItemState(t.id, item, { autoPublishOnRender: nextAuto });
+    const cleanCaption = sanitizeCaptionText(item.caption, t.title);
+    updatePublishItemState(t.id, item, {
+      autoPublishOnRender: nextAuto,
+      caption: cleanCaption,
+    });
 
     try {
       const supabase = createSupabaseBrowserClient();
@@ -427,7 +450,7 @@ export function StudioModulesWorkspace({
             publishType: item.publishType,
             videoUrl: item.videoUrl,
             photoUrl: item.photoUrl,
-            caption: item.caption,
+            caption: cleanCaption,
           },
         })
         .eq("id", t.id);
@@ -446,7 +469,6 @@ export function StudioModulesWorkspace({
     }
   };
 
-  // Jalankan alur otomatis langsung dari dalam aplikasi via /api/publish/facebook (dengan kredensial tersimpan & simpan payload render)
   const handleRunAutomatedPipelineFromApp = async (
     t: TaskWithPayloads,
     item: PublishItemState
@@ -458,6 +480,8 @@ export function StudioModulesWorkspace({
       delete copy[t.id];
       return copy;
     });
+
+    const cleanCaption = sanitizeCaptionText(item.caption, t.title);
 
     try {
       const supabase = createSupabaseBrowserClient();
@@ -477,7 +501,7 @@ export function StudioModulesWorkspace({
             publishType: item.publishType,
             videoUrl: item.videoUrl,
             photoUrl: item.photoUrl,
-            caption: item.caption,
+            caption: cleanCaption,
           },
         })
         .eq("id", t.id);
@@ -504,7 +528,7 @@ export function StudioModulesWorkspace({
           pageId: fbPageId,
           accessToken: fbAccessToken,
           publishType: item.publishType,
-          caption: item.caption,
+          caption: cleanCaption,
           videoUrl: item.videoUrl,
           photoUrl: item.photoUrl,
           saveCredentials: Boolean(fbPageId && fbAccessToken),
@@ -561,6 +585,7 @@ export function StudioModulesWorkspace({
   const handleFacebookAutoPost = async (t: TaskWithPayloads) => {
     if (publishingTaskId || runningAutoTaskId) return;
     const item = getPublishItemState(t);
+    const cleanCaption = sanitizeCaptionText(item.caption, t.title);
     setPublishingTaskId(t.id);
     setPublishFeedback((prev) => {
       const copy = { ...prev };
@@ -578,7 +603,7 @@ export function StudioModulesWorkspace({
           pageId: fbPageId,
           accessToken: fbAccessToken,
           publishType: item.publishType,
-          caption: item.caption,
+          caption: cleanCaption,
           videoUrl: item.videoUrl,
           photoUrl: item.photoUrl,
           saveCredentials: Boolean(fbPageId && fbAccessToken),
