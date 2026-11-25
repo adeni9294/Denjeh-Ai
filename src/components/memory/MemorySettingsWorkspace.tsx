@@ -16,6 +16,7 @@ import {
   CheckCircle2,
   Search,
   Cpu,
+  ShieldCheck,
 } from "lucide-react";
 
 type MemoryRow = DbMemory & {
@@ -28,6 +29,35 @@ type MemoryRow = DbMemory & {
 type ProjectRow = DbProject & {
   system_instructions?: string | null;
 };
+
+const RESERVED_CREDENTIAL_KEYS = ["fb_page_credentials"];
+
+function isCredentialMemoryKey(key: string | null | undefined): boolean {
+  return RESERVED_CREDENTIAL_KEYS.includes(
+    String(key ?? "").trim().toLowerCase()
+  );
+}
+
+function formatSafeMemoryContent(m: MemoryRow): string {
+  const raw = String(m.content ?? "");
+  if (!isCredentialMemoryKey(m.memory_key)) {
+    return raw;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as {
+      pageId?: string;
+      accessToken?: string;
+    };
+    const pageId = String(parsed.pageId ?? "").trim() || "(tidak diatur)";
+    const tokenStatus = String(parsed.accessToken ?? "").trim()
+      ? "•••••••••••• (Tersimpan aman — disembunyikan)"
+      : "(kosong)";
+    return `Facebook Page ID: ${pageId} | Page Access Token: ${tokenStatus}`;
+  } catch {
+    return "Kredensial Facebook Page tersimpan (konten sensitif disembunyikan).";
+  }
+}
 
 export function MemorySettingsWorkspace() {
   const [activeTab, setActiveTab] = useState<"memory" | "providers">("memory");
@@ -187,6 +217,17 @@ export function MemorySettingsWorkspace() {
     const contentTrimmed = newContent.trim();
     if (!contentTrimmed || savingNew) return;
 
+    const keyNormalized = (newKey.trim() || `catatan_${Date.now()}`)
+      .toLowerCase()
+      .replace(/[^a-z0-9-_]+/g, "_");
+
+    if (isCredentialMemoryKey(keyNormalized)) {
+      setErrorMsg(
+        "Kunci kredensial dilindungi. Kelola kredensial Facebook Page melalui Publishing Center."
+      );
+      return;
+    }
+
     setSavingNew(true);
     setErrorMsg(null);
     setNoticeMsg(null);
@@ -200,10 +241,6 @@ export function MemorySettingsWorkspace() {
         setErrorMsg("Sesi tidak valid. Silakan login terlebih dahulu.");
         return;
       }
-
-      const keyNormalized = (newKey.trim() || `catatan_${Date.now()}`)
-        .toLowerCase()
-        .replace(/[^a-z0-9-_]+/g, "_");
 
       const clampedImp = Math.min(10, Math.max(1, Number(newImportance) || 8));
 
@@ -235,13 +272,17 @@ export function MemorySettingsWorkspace() {
   };
 
   const startEditMemory = (m: MemoryRow) => {
+    if (isCredentialMemoryKey(m.memory_key)) return;
     setEditingId(m.id);
     setEditContent(String(m.content ?? ""));
     setEditImportance(Number(m.importance ?? 8));
   };
 
   const handleUpdateMemory = async (id: string) => {
+    const target = memories.find((m) => m.id === id);
+    if (!target || isCredentialMemoryKey(target.memory_key)) return;
     if (!editContent.trim()) return;
+
     setErrorMsg(null);
     setNoticeMsg(null);
 
@@ -295,9 +336,10 @@ export function MemorySettingsWorkspace() {
     if (scopeFilter !== "all" && scopeVal !== scopeFilter) return false;
     if (!searchQuery.trim()) return true;
     const q = searchQuery.toLowerCase();
+    const safeContent = formatSafeMemoryContent(m).toLowerCase();
     return (
       String(m.memory_key ?? "").toLowerCase().includes(q) ||
-      String(m.content ?? "").toLowerCase().includes(q)
+      safeContent.includes(q)
     );
   });
 
@@ -554,10 +596,16 @@ export function MemorySettingsWorkspace() {
                 <div className="space-y-2.5">
                   {filteredMemories.map((m) => {
                     const isEditing = editingId === m.id;
+                    const isCred = isCredentialMemoryKey(m.memory_key);
+
                     return (
                       <div
                         key={m.id}
-                        className="rounded-xl border border-slate-200/80 dark:border-studio-border bg-slate-50/70 dark:bg-studio-navy/80 p-3.5 space-y-2 text-xs"
+                        className={`rounded-xl border p-3.5 space-y-2 text-xs ${
+                          isCred
+                            ? "border-amber-500/30 bg-amber-500/5"
+                            : "border-slate-200/80 dark:border-studio-border bg-slate-50/70 dark:bg-studio-navy/80"
+                        }`}
                       >
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <div className="flex flex-wrap items-center gap-2">
@@ -573,29 +621,36 @@ export function MemorySettingsWorkspace() {
                             >
                               {String(m.scope || "project")}
                             </Badge>
+                            {isCred && (
+                              <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-300">
+                                <ShieldCheck className="h-3 w-3" /> Kredensial
+                                Terlindungi
+                              </span>
+                            )}
                             <span className="text-[11px] text-slate-400">
                               Bobot: {Number(m.importance ?? 5)}/10
                             </span>
                           </div>
 
                           <div className="flex items-center gap-1.5">
-                            {!isEditing ? (
-                              <button
-                                type="button"
-                                onClick={() => startEditMemory(m)}
-                                className="rounded-lg border border-slate-600/40 bg-slate-800/70 px-2.5 py-1 text-[11px] text-slate-200 hover:bg-slate-700/70"
-                              >
-                                Edit
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => handleUpdateMemory(m.id)}
-                                className="rounded-lg bg-emerald-600/20 border border-emerald-500/30 px-2.5 py-1 text-[11px] text-emerald-300 hover:bg-emerald-600/30"
-                              >
-                                Simpan
-                              </button>
-                            )}
+                            {!isCred &&
+                              (!isEditing ? (
+                                <button
+                                  type="button"
+                                  onClick={() => startEditMemory(m)}
+                                  className="rounded-lg border border-slate-600/40 bg-slate-800/70 px-2.5 py-1 text-[11px] text-slate-200 hover:bg-slate-700/70"
+                                >
+                                  Edit
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => handleUpdateMemory(m.id)}
+                                  className="rounded-lg bg-emerald-600/20 border border-emerald-500/30 px-2.5 py-1 text-[11px] text-emerald-300 hover:bg-emerald-600/30"
+                                >
+                                  Simpan
+                                </button>
+                              ))}
                             <button
                               type="button"
                               onClick={() => handleDeleteMemory(m.id)}
@@ -607,7 +662,7 @@ export function MemorySettingsWorkspace() {
                           </div>
                         </div>
 
-                        {isEditing ? (
+                        {isEditing && !isCred ? (
                           <div className="space-y-2">
                             <textarea
                               rows={4}
@@ -633,7 +688,7 @@ export function MemorySettingsWorkspace() {
                           </div>
                         ) : (
                           <p className="whitespace-pre-line text-slate-300 leading-relaxed">
-                            {String(m.content ?? "")}
+                            {formatSafeMemoryContent(m)}
                           </p>
                         )}
                       </div>
