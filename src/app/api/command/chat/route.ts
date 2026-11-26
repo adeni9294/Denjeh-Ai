@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { generatePlanWithFallback } from "@/lib/ai/cloud-runner";
 import { DbAiModel, DbAiProvider, DbMemory, DbProject } from "@/types/studio";
 
 interface ChatTurn {
@@ -14,43 +13,87 @@ interface ChatRequestBody {
   messages?: ChatTurn[];
 }
 
+const GEMINI_CHAT_MODELS = [
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-2.0-flash",
+];
+
 const EASY_GOING_SYSTEM_PROMPT = `Kamu adalah asisten obrolan di aplikasi DENJEH AI untuk proyek kreatif seperti DNAverse — The Awakening.
 Gaya bicaramu santai, luwes, hangat, dan mengalir seperti teman ngobrol tanya-jawab di Gemini atau ChatGPT.
 Aturan utama:
 - Jawab langsung ke inti dengan bahasa Indonesia yang natural dan tidak kaku.
 - Jika pengguna sedang brainstorming, bertanya ringan, atau mendiskusikan ide/alur, balas secara dialogis dan tawarkan pertanyaan lanjutan atau sudut pandang baru yang relevan.
 - Jangan memaksa membuat rencana DAG, JSON, atau format agen yang kaku kecuali pengguna secara eksplisit meminta rencana langkah atau eksekusi tugas.
-- Tetap ringkas dan jelas, sesuaikan panjang jawaban dengan konteks obrolan.
+- Tetap ringkas dan jelas, sesuaikan panjang jawaban dengan konteks obrolan.`;
 
-Kembalikan jawaban dalam format JSON valid dengan skema:
-{
-  "reply": "Balasan santai dan natural untuk pengguna"
-}`;
+function findGeminiApiKey(
+  providers: DbAiProvider[],
+  models: DbAiModel[]
+): { apiKey: string; preferredModel: string } {
+  const modelFromDb = models.find((m) =>
+    String(m.model_identifier ?? "")
+      .toLowerCase()
+      .includes("gemini")
+  );
+  const preferredModel = modelFromDb?.model_identifier?.trim() || "";
 
-function extractReplyFromResult(rawResult: unknown): {
-  reply: string;
-  modelUsed: string;
-  providerUsed: string;
-} {
-  const resObj = (rawResult ?? {}) as Record<string, unknown>;
-  const modelUsed = String(resObj.modelUsed ?? "gemini");
-  const providerUsed = String(resObj.providerUsed ?? "gemini");
+  // Cari nilai string yang berformat Gemini API key (AIza...) di seluruh field provider aktif
+  for (const p of providers) {
+    const row = p as unknown as Record<string, unknown>;
+    const providerLabel = String(
+      row.provider_key ?? row.provider_name ?? row.name ?? ""
+    ).toLowerCase();
 
-  if (typeof resObj.reply === "string" && resObj.reply.trim()) {
-    return { reply: resObj.reply.trim(), modelUsed, providerUsed };
+    for (const val of Object.values(row)) {
+      if (typeof val === "string") {
+        const trimmed = val.trim();
+        if (trimmed.startsWith("AIza") && trimmed.length >= 25) {
+          return { apiKey: trimmed, preferredModel };
+        }
+        // Cek jika tersimpan sebagai JSON string
+        if (trimmed.startsWith("{")) {
+          try {
+            const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+            for (const innerVal of Object.values(parsed)) {
+              if (
+                typeof innerVal === "string" &&
+                innerVal.trim().startsWith("AIza") &&
+                innerVal.trim().length >= 25
+              ) {
+                return { apiKey: innerVal.trim(), preferredModel };
+              }
+            }
+          } catch {
+            // Abaikan
+          }
+        }
+      }
+    }
+
+    if (providerLabel.includes("gemini") || providerLabel.includes("google")) {
+      for (const candidateKey of [
+        "api_key",
+        "apiKey",
+        "key",
+        "secret",
+        "secret_key",
+        "token",
+      ]) {
+        const candidate = row[candidateKey];
+        if (typeof candidate === "string" && candidate.trim().length >= 20) {
+          return { apiKey: candidate.trim(), preferredModel };
+        }
+      }
+    }
   }
-  if (typeof resObj.intentSummary === "string" && resObj.intentSummary.trim()) {
-    return { reply: resObj.intentSummary.trim(), modelUsed, providerUsed };
-  }
-  if (typeof resObj.rawText === "string" && resObj.rawText.trim()) {
-    return { reply: resObj.rawText.trim(), modelUsed, providerUsed };
-  }
 
-  return {
-    reply: "Siap, ada yang ingin kita obrolkan atau eksplorasi lebih lanjut?",
-    modelUsed,
-    providerUsed,
-  };
+  const envKey =
+    process.env.GEMINI_API_KEY?.trim() ||
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim() ||
+    "";
+
+  return { apiKey: envKey, preferredModel };
 }
 
 export async function POST(req: NextRequest) {
@@ -139,54 +182,121 @@ export async function POST(req: NextRequest) {
       supabase.from("ai_models").select("*").eq("is_active", true),
     ]);
 
-    const conversationText = turns
-      .map((t) => `${t.role === "assistant" ? "Asisten" : "Pengguna"}: ${t.content.trim()}`)
-      .join("\n");
+    const { apiKey, preferredModel } = findGeminiApiKey(
+      (providers as DbAiProvider[]) ?? [],
+      (models as DbAiModel[]) ?? []
+    );
 
-    const memoryText =
-      memories.length > 0
-        ? memories
-            .slice(0, 5)
-            .map((m) => `- ${m.memory_key}: ${m.content}`)
-            .join("\n")
-        : "- Tidak ada catatan memori tambahan.";
+    if (!apiKey) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "API key Gemini tidak ditemukan pada provider aktif maupun environment server.",
+        },
+        { status: 500 }
+      );
+    }
 
-    const userPrompt = `PROYEK AKTIF: ${projectContext?.name ?? "Tanpa Proyek Khusus"}
-DESKRIPSI PROYEK: ${projectContext?.description ?? "-"}
+    const contextNote = projectContext
+      ? `\nKonteks proyek aktif: ${projectContext.name}${
+          projectContext.description ? ` — ${projectContext.description}` : ""
+        }.${
+          memories.length > 0
+            ? `\nCatatan memori relevan:\n${memories
+                .slice(0, 5)
+                .map((m) => `- ${m.memory_key}: ${m.content}`)
+                .join("\n")}`
+            : ""
+        }`
+      : "";
 
-MEMORI TERKAIT:
-${memoryText}
+    const contents = turns.map((turn) => ({
+      role: turn.role === "assistant" ? "model" : "user",
+      parts: [{ text: turn.content.trim() }],
+    }));
 
-RIWAYAT OBROLAN:
-${conversationText}
+    const modelQueue = Array.from(
+      new Set([preferredModel, ...GEMINI_CHAT_MODELS].filter(Boolean))
+    );
 
-Balas pesan terakhir pengguna dengan santai dan mengalir.`;
+    let lastError = "";
+    for (const model of modelQueue) {
+      try {
+        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
+          apiKey
+        )}`;
 
-    const result = await generatePlanWithFallback({
-      providers: (providers as DbAiProvider[]) ?? [],
-      models: (models as DbAiModel[]) ?? [],
-      systemPrompt: EASY_GOING_SYSTEM_PROMPT,
-      userPrompt,
-    });
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            systemInstruction: {
+              parts: [{ text: `${EASY_GOING_SYSTEM_PROMPT}${contextNote}` }],
+            },
+            contents,
+            generationConfig: {
+              temperature: 0.8,
+            },
+          }),
+        });
 
-    const extracted = extractReplyFromResult(result);
+        const rawText = await response.text();
+        if (!response.ok) {
+          lastError = `${model} (${response.status}): ${rawText.slice(0, 220)}`;
+          continue;
+        }
 
-    return NextResponse.json({
-      ok: true,
-      reply: extracted.reply,
-      modelUsed: extracted.modelUsed,
-      providerUsed: extracted.providerUsed,
-    });
-  } catch (err) {
+        let data: {
+          candidates?: Array<{
+            content?: {
+              parts?: Array<{ text?: string }>;
+            };
+          }>;
+        } = {};
+        try {
+          data = JSON.parse(rawText) as typeof data;
+        } catch {
+          lastError = `${model}: Respons bukan JSON valid.`;
+          continue;
+        }
+
+        const replyText = data.candidates?.[0]?.content?.parts
+          ?.map((part) => part.text ?? "")
+          .join("")
+          .trim();
+
+        if (!replyText) {
+          lastError = `${model}: Balasan kosong.`;
+          continue;
+        }
+
+        return NextResponse.json({
+          ok: true,
+          reply: replyText,
+          modelUsed: model,
+          providerUsed: "gemini",
+        });
+      } catch (err) {
+        lastError =
+          err instanceof Error
+            ? `${model}: ${err.message}`
+            : `${model}: Gagal memanggil Gemini API.`;
+      }
+    }
+
     return NextResponse.json(
       {
         ok: false,
-        error:
-          err instanceof Error
-            ? err.message
-            : "Terjadi kesalahan saat memproses obrolan.",
+        error: `Gagal mendapatkan balasan obrolan: ${lastError || "Unknown error"}`,
       },
-      { status: 500 }
+      { status: 502 }
     );
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Terjadi kesalahan internal saat memproses obrolan.";
+    return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
 }
