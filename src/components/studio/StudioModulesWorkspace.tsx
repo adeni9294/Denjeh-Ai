@@ -36,6 +36,8 @@ export type StudioModuleKey =
   | "publishing"
   | "analytics";
 
+export type FormatTabKey = "text" | "photo" | "video";
+
 interface UsageLogRow {
   id: string;
   provider_key?: string | null;
@@ -117,6 +119,13 @@ export function StudioModulesWorkspace({
   const [publishItems, setPublishItems] = useState<
     Record<string, PublishItemState>
   >({});
+  const [activeFormatTabs, setActiveFormatTabs] = useState<
+    Record<string, FormatTabKey>
+  >({});
+  const [photoPrompts, setPhotoPrompts] = useState<Record<string, string>>({});
+  const [generatingPhotoTaskId, setGeneratingPhotoTaskId] = useState<
+    string | null
+  >(null);
   const [fbPageId, setFbPageId] = useState("");
   const [fbAccessToken, setFbAccessToken] = useState("");
   const [hasSavedFbCreds, setHasSavedFbCreds] = useState(false);
@@ -412,6 +421,40 @@ export function StudioModulesWorkspace({
     };
   };
 
+  const getActiveTab = (
+    t: TaskWithPayloads,
+    item: PublishItemState
+  ): FormatTabKey => {
+    if (activeFormatTabs[t.id]) return activeFormatTabs[t.id];
+    if (item.publishType === "photo") return "photo";
+    if (item.publishType === "reels") return "video";
+    return "text";
+  };
+
+  const selectFormatTab = (
+    t: TaskWithPayloads,
+    item: PublishItemState,
+    tab: FormatTabKey
+  ) => {
+    setActiveFormatTabs((prev) => ({ ...prev, [t.id]: tab }));
+    const mappedType: "reels" | "photo" | "text" =
+      tab === "video" ? "reels" : tab;
+    updatePublishItemState(t.id, item, { publishType: mappedType });
+  };
+
+  const getPhotoPrompt = (
+    t: TaskWithPayloads,
+    item: PublishItemState
+  ): string => {
+    if (photoPrompts[t.id] !== undefined) return photoPrompts[t.id];
+    const out = (t.output_payload ?? {}) as Record<string, unknown>;
+    const payload = (t.input_payload ?? {}) as Record<string, unknown>;
+    const rawPrompt = String(
+      payload.imagePrompt || out.visualPrompt || item.caption || t.title
+    ).trim();
+    return rawPrompt.slice(0, 600);
+  };
+
   const updatePublishItemState = (
     taskId: string,
     base: PublishItemState,
@@ -421,6 +464,110 @@ export function StudioModulesWorkspace({
       ...prev,
       [taskId]: { ...base, ...patch },
     }));
+  };
+
+  const handleGeneratePhoto = async (
+    t: TaskWithPayloads,
+    item: PublishItemState
+  ) => {
+    if (generatingPhotoTaskId || runningAutoTaskId || publishingTaskId) return;
+    const promptValue = getPhotoPrompt(t, item).trim();
+    if (!promptValue) {
+      setPublishFeedback((prev) => ({
+        ...prev,
+        [t.id]: {
+          ok: false,
+          message: "Isi prompt gambar terlebih dahulu sebelum generate foto.",
+        },
+      }));
+      return;
+    }
+
+    setGeneratingPhotoTaskId(t.id);
+    setPublishFeedback((prev) => {
+      const copy = { ...prev };
+      delete copy[t.id];
+      return copy;
+    });
+
+    try {
+      const res = await fetch("/api/media/generate-image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: promptValue,
+          taskId: t.id,
+          filePrefix: `task-${t.id.slice(0, 8)}`,
+        }),
+      });
+
+      const data = (await res.json()) as {
+        ok?: boolean;
+        imageUrl?: string;
+        error?: string;
+      };
+
+      if (!res.ok || !data.ok || !data.imageUrl) {
+        setPublishFeedback((prev) => ({
+          ...prev,
+          [t.id]: {
+            ok: false,
+            message:
+              data.error ||
+              "Gagal membuat gambar melalui /api/media/generate-image.",
+          },
+        }));
+        return;
+      }
+
+      const nextItem: PublishItemState = {
+        ...item,
+        publishType: "photo",
+        photoUrl: data.imageUrl,
+      };
+      setPublishItems((prev) => ({ ...prev, [t.id]: nextItem }));
+      setActiveFormatTabs((prev) => ({ ...prev, [t.id]: "photo" }));
+
+      const supabase = createSupabaseBrowserClient();
+      const prevCp =
+        t.checkpoint_state && typeof t.checkpoint_state === "object"
+          ? (t.checkpoint_state as Record<string, unknown>)
+          : {};
+
+      await supabase
+        .from("tasks")
+        .update({
+          checkpoint_state: {
+            ...prevCp,
+            publishType: "photo",
+            photoUrl: data.imageUrl,
+            caption: sanitizeCaptionText(item.caption, t.title),
+          },
+        })
+        .eq("id", t.id);
+
+      setPublishFeedback((prev) => ({
+        ...prev,
+        [t.id]: {
+          ok: true,
+          message:
+            "Gambar berhasil dibuat & tersimpan ke Supabase Storage. Siap diposting ke Facebook.",
+        },
+      }));
+    } catch (err) {
+      setPublishFeedback((prev) => ({
+        ...prev,
+        [t.id]: {
+          ok: false,
+          message:
+            err instanceof Error
+              ? err.message
+              : "Gagal memanggil endpoint generate gambar.",
+        },
+      }));
+    } finally {
+      setGeneratingPhotoTaskId(null);
+    }
   };
 
   const handleToggleAutoPublishOnRender = async (
@@ -481,7 +628,8 @@ export function StudioModulesWorkspace({
       return copy;
     });
 
-    const cleanCaption = sanitizeCaptionText(item.caption, t.title);
+    const activeItem = publishItems[t.id] ?? item;
+    const cleanCaption = sanitizeCaptionText(activeItem.caption, t.title);
 
     try {
       const supabase = createSupabaseBrowserClient();
@@ -497,16 +645,16 @@ export function StudioModulesWorkspace({
             ...prevCp,
             renderStatus: "completed",
             renderedAt: new Date().toISOString(),
-            autoPublishFacebook: item.autoPublishOnRender,
-            publishType: item.publishType,
-            videoUrl: item.videoUrl,
-            photoUrl: item.photoUrl,
+            autoPublishFacebook: activeItem.autoPublishOnRender,
+            publishType: activeItem.publishType,
+            videoUrl: activeItem.videoUrl,
+            photoUrl: activeItem.photoUrl,
             caption: cleanCaption,
           },
         })
         .eq("id", t.id);
 
-      if (!item.autoPublishOnRender) {
+      if (!activeItem.autoPublishOnRender) {
         setPublishFeedback((prev) => ({
           ...prev,
           [t.id]: {
@@ -527,10 +675,10 @@ export function StudioModulesWorkspace({
           taskId: t.id,
           pageId: fbPageId,
           accessToken: fbAccessToken,
-          publishType: item.publishType,
+          publishType: activeItem.publishType,
           caption: cleanCaption,
-          videoUrl: item.videoUrl,
-          photoUrl: item.photoUrl,
+          videoUrl: activeItem.videoUrl,
+          photoUrl: activeItem.photoUrl,
           saveCredentials: Boolean(fbPageId && fbAccessToken),
         }),
       });
@@ -582,10 +730,14 @@ export function StudioModulesWorkspace({
     }
   };
 
-  const handleFacebookAutoPost = async (t: TaskWithPayloads) => {
+  const handleFacebookAutoPost = async (
+    t: TaskWithPayloads,
+    overrideType?: "reels" | "photo" | "text"
+  ) => {
     if (publishingTaskId || runningAutoTaskId) return;
-    const item = getPublishItemState(t);
-    const cleanCaption = sanitizeCaptionText(item.caption, t.title);
+    const baseItem = publishItems[t.id] ?? getPublishItemState(t);
+    const effectiveType = overrideType ?? baseItem.publishType;
+    const cleanCaption = sanitizeCaptionText(baseItem.caption, t.title);
     setPublishingTaskId(t.id);
     setPublishFeedback((prev) => {
       const copy = { ...prev };
@@ -602,10 +754,10 @@ export function StudioModulesWorkspace({
           taskId: t.id,
           pageId: fbPageId,
           accessToken: fbAccessToken,
-          publishType: item.publishType,
+          publishType: effectiveType,
           caption: cleanCaption,
-          videoUrl: item.videoUrl,
-          photoUrl: item.photoUrl,
+          videoUrl: baseItem.videoUrl,
+          photoUrl: baseItem.photoUrl,
           saveCredentials: Boolean(fbPageId && fbAccessToken),
         }),
       });
@@ -1070,7 +1222,7 @@ export function StudioModulesWorkspace({
                   {completedTasks.length})
                 </h2>
               </div>
-              <Badge variant="purple">3 Format Output</Badge>
+              <Badge variant="purple">3 Tab Terpisah</Badge>
             </div>
 
             {completedTasks.length === 0 ? (
@@ -1081,10 +1233,12 @@ export function StudioModulesWorkspace({
             ) : (
               <div className="space-y-3">
                 {completedTasks.map((t) => {
-                  const item = getPublishItemState(t);
+                  const item = publishItems[t.id] ?? getPublishItemState(t);
+                  const currentTab = getActiveTab(t, item);
                   const feedback = publishFeedback[t.id];
                   const isPublishingThis = publishingTaskId === t.id;
                   const isRunningAutoThis = runningAutoTaskId === t.id;
+                  const isGeneratingPhotoThis = generatingPhotoTaskId === t.id;
                   const cp = (t.checkpoint_state ?? {}) as Record<
                     string,
                     unknown
@@ -1159,7 +1313,11 @@ export function StudioModulesWorkspace({
 
                           <button
                             type="button"
-                            disabled={isRunningAutoThis || isPublishingThis}
+                            disabled={
+                              isRunningAutoThis ||
+                              isPublishingThis ||
+                              isGeneratingPhotoThis
+                            }
                             onClick={() =>
                               handleRunAutomatedPipelineFromApp(t, item)
                             }
@@ -1190,130 +1348,240 @@ export function StudioModulesWorkspace({
                               </>
                             )}
                           </button>
+                        </div>
+                      </div>
+
+                      {/* 3 Tab Keluaran Terpisah: Tab Teks, Tab Foto, Tab Video */}
+                      <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                        <div className="inline-flex flex-wrap gap-1.5 rounded-xl border border-slate-800 bg-slate-900/90 p-1">
+                          <button
+                            type="button"
+                            onClick={() => selectFormatTab(t, item, "text")}
+                            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[11px] font-semibold transition ${
+                              currentTab === "text"
+                                ? "bg-emerald-600 text-white"
+                                : "text-slate-400 hover:text-slate-200"
+                            }`}
+                          >
+                            <FileText className="h-3.5 w-3.5" />
+                            <span>Tab Teks</span>
+                          </button>
 
                           <button
                             type="button"
-                            disabled={isPublishingThis || isRunningAutoThis}
-                            onClick={() => handleFacebookAutoPost(t)}
-                            className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
+                            onClick={() => selectFormatTab(t, item, "photo")}
+                            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[11px] font-semibold transition ${
+                              currentTab === "photo"
+                                ? "bg-blue-600 text-white"
+                                : "text-slate-400 hover:text-slate-200"
+                            }`}
                           >
-                            <Send className="h-3 w-3" />
-                            <span>
-                              {isPublishingThis
-                                ? "Mempublikasikan..."
-                                : "Auto-Post Facebook"}
-                            </span>
+                            <ImageIcon className="h-3.5 w-3.5" />
+                            <span>Tab Foto</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => selectFormatTab(t, item, "video")}
+                            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[11px] font-semibold transition ${
+                              currentTab === "video"
+                                ? "bg-purple-600 text-white"
+                                : "text-slate-400 hover:text-slate-200"
+                            }`}
+                          >
+                            <Video className="h-3.5 w-3.5" />
+                            <span>Tab Video</span>
                           </button>
                         </div>
-                      </div>
 
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-[11px] text-slate-400">
-                          Format Publikasi:
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            updatePublishItemState(t.id, item, {
-                              publishType: "reels",
-                            })
-                          }
-                          className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-medium border ${
-                            item.publishType === "reels"
-                              ? "border-purple-500 bg-purple-600/25 text-purple-200"
-                              : "border-slate-700 bg-slate-800/60 text-slate-400"
-                          }`}
-                        >
-                          <Video className="h-3 w-3" />
-                          <span>Video Reels</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            updatePublishItemState(t.id, item, {
-                              publishType: "photo",
-                            })
-                          }
-                          className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-medium border ${
-                            item.publishType === "photo"
-                              ? "border-blue-500 bg-blue-600/25 text-blue-200"
-                              : "border-slate-700 bg-slate-800/60 text-slate-400"
-                          }`}
-                        >
-                          <ImageIcon className="h-3 w-3" />
-                          <span>Foto</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            updatePublishItemState(t.id, item, {
-                              publishType: "text",
-                            })
-                          }
-                          className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-medium border ${
-                            item.publishType === "text"
-                              ? "border-emerald-500 bg-emerald-600/25 text-emerald-200"
-                              : "border-slate-700 bg-slate-800/60 text-slate-400"
-                          }`}
-                        >
-                          <FileText className="h-3 w-3" />
-                          <span>Teks</span>
-                        </button>
-                      </div>
+                        {currentTab === "text" && (
+                          <div className="space-y-2.5">
+                            <label className="text-[11px] text-emerald-300 font-medium block">
+                              Keluaran Teks — Caption / Hook / Tagar Rilis
+                            </label>
+                            <textarea
+                              rows={5}
+                              value={item.caption}
+                              onChange={(e) =>
+                                updatePublishItemState(t.id, item, {
+                                  publishType: "text",
+                                  caption: e.target.value,
+                                })
+                              }
+                              className="w-full resize-none rounded-lg border border-slate-700 bg-slate-900/90 p-2.5 text-xs text-slate-200"
+                            />
+                            <div className="flex flex-wrap gap-2">
+                              <button
+                                type="button"
+                                disabled={
+                                  isPublishingThis ||
+                                  isRunningAutoThis ||
+                                  isGeneratingPhotoThis
+                                }
+                                onClick={() => {
+                                  updatePublishItemState(t.id, item, {
+                                    publishType: "text",
+                                  });
+                                  void handleFacebookAutoPost(t, "text");
+                                }}
+                                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
+                              >
+                                <Send className="h-3 w-3" />
+                                <span>
+                                  {isPublishingThis
+                                    ? "Mempublikasikan Teks..."
+                                    : "Posting Format Teks ke FB"}
+                                </span>
+                              </button>
+                            </div>
+                          </div>
+                        )}
 
-                      {item.publishType === "reels" && (
-                        <div className="space-y-1">
-                          <label className="text-[11px] text-purple-300 font-medium">
-                            URL Video Reels (MP4 publik hasil render Seedance /
-                            Flow)
-                          </label>
-                          <input
-                            type="url"
-                            value={item.videoUrl}
-                            onChange={(e) =>
-                              updatePublishItemState(t.id, item, {
-                                videoUrl: e.target.value,
-                              })
-                            }
-                            placeholder="https://.../dnaverse-reels.mp4"
-                            className="w-full rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-1.5 text-xs text-slate-200"
-                          />
-                        </div>
-                      )}
+                        {currentTab === "photo" && (
+                          <div className="space-y-2.5">
+                            <div className="space-y-1">
+                              <label className="text-[11px] text-blue-300 font-medium block">
+                                Prompt Gambar (Gemini → Supabase Storage)
+                              </label>
+                              <textarea
+                                rows={2}
+                                value={getPhotoPrompt(t, item)}
+                                onChange={(e) =>
+                                  setPhotoPrompts((prev) => ({
+                                    ...prev,
+                                    [t.id]: e.target.value,
+                                  }))
+                                }
+                                className="w-full resize-none rounded-lg border border-slate-700 bg-slate-900/90 p-2 text-xs text-slate-200"
+                              />
+                            </div>
 
-                      {item.publishType === "photo" && (
-                        <div className="space-y-1">
-                          <label className="text-[11px] text-blue-300 font-medium">
-                            URL Foto / Cover (JPG/PNG publik)
-                          </label>
-                          <input
-                            type="url"
-                            value={item.photoUrl}
-                            onChange={(e) =>
-                              updatePublishItemState(t.id, item, {
-                                photoUrl: e.target.value,
-                              })
-                            }
-                            placeholder="https://.../dnaverse-keyframe.png"
-                            className="w-full rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-1.5 text-xs text-slate-200"
-                          />
-                        </div>
-                      )}
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                disabled={
+                                  isGeneratingPhotoThis ||
+                                  isPublishingThis ||
+                                  isRunningAutoThis
+                                }
+                                onClick={() =>
+                                  void handleGeneratePhoto(t, item)
+                                }
+                                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
+                              >
+                                <ImageIcon className="h-3 w-3" />
+                                <span>
+                                  {isGeneratingPhotoThis
+                                    ? "Generating Foto..."
+                                    : "Generate Foto"}
+                                </span>
+                              </button>
 
-                      <div className="space-y-1">
-                        <label className="text-[11px] text-slate-400">
-                          Teks Caption / Hook / Tagar Rilis
-                        </label>
-                        <textarea
-                          rows={4}
-                          value={item.caption}
-                          onChange={(e) =>
-                            updatePublishItemState(t.id, item, {
-                              caption: e.target.value,
-                            })
-                          }
-                          className="w-full resize-none rounded-lg border border-slate-700 bg-slate-950/80 p-2.5 text-xs text-slate-200"
-                        />
+                              <button
+                                type="button"
+                                disabled={
+                                  !item.photoUrl.trim() ||
+                                  item.photoUrl.includes("...") ||
+                                  isPublishingThis ||
+                                  isRunningAutoThis ||
+                                  isGeneratingPhotoThis
+                                }
+                                onClick={() => {
+                                  updatePublishItemState(t.id, item, {
+                                    publishType: "photo",
+                                  });
+                                  void handleFacebookAutoPost(t, "photo");
+                                }}
+                                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
+                              >
+                                <Send className="h-3 w-3" />
+                                <span>
+                                  {isPublishingThis
+                                    ? "Mempublikasikan Foto..."
+                                    : "Posting Format Foto ke FB"}
+                                </span>
+                              </button>
+                            </div>
+
+                            <div className="space-y-1">
+                              <label className="text-[11px] text-blue-300 font-medium block">
+                                URL Foto / Cover (JPG/PNG publik)
+                              </label>
+                              <input
+                                type="url"
+                                value={item.photoUrl}
+                                onChange={(e) =>
+                                  updatePublishItemState(t.id, item, {
+                                    publishType: "photo",
+                                    photoUrl: e.target.value,
+                                  })
+                                }
+                                placeholder="https://.../storage/v1/object/public/..."
+                                className="w-full rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-xs text-slate-200"
+                              />
+                            </div>
+
+                            {item.photoUrl &&
+                              /^https?:\/\//i.test(item.photoUrl) &&
+                              !item.photoUrl.includes("...") && (
+                                <div className="overflow-hidden rounded-lg border border-slate-700 bg-slate-900 p-1.5">
+                                  <img
+                                    src={item.photoUrl}
+                                    alt={t.title}
+                                    className="max-h-56 w-full rounded object-cover"
+                                  />
+                                </div>
+                              )}
+                          </div>
+                        )}
+
+                        {currentTab === "video" && (
+                          <div className="space-y-2.5">
+                            <div className="space-y-1">
+                              <label className="text-[11px] text-purple-300 font-medium block">
+                                Keluaran Video — URL Video Reels (MP4 publik hasil
+                                render Seedance / Flow)
+                              </label>
+                              <input
+                                type="url"
+                                value={item.videoUrl}
+                                onChange={(e) =>
+                                  updatePublishItemState(t.id, item, {
+                                    publishType: "reels",
+                                    videoUrl: e.target.value,
+                                  })
+                                }
+                                placeholder="https://.../dnaverse-reels.mp4"
+                                className="w-full rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-xs text-slate-200"
+                              />
+                            </div>
+
+                            <button
+                              type="button"
+                              disabled={
+                                !item.videoUrl.trim() ||
+                                item.videoUrl.includes("...") ||
+                                isPublishingThis ||
+                                isRunningAutoThis ||
+                                isGeneratingPhotoThis
+                              }
+                              onClick={() => {
+                                updatePublishItemState(t.id, item, {
+                                  publishType: "reels",
+                                });
+                                void handleFacebookAutoPost(t, "reels");
+                              }}
+                              className="inline-flex items-center gap-1.5 rounded-lg bg-purple-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-purple-500 disabled:opacity-50"
+                            >
+                              <Send className="h-3 w-3" />
+                              <span>
+                                {isPublishingThis
+                                  ? "Mempublikasikan Video..."
+                                  : "Posting Format Video ke FB"}
+                              </span>
+                            </button>
+                          </div>
+                        )}
                       </div>
 
                       {feedback && (
