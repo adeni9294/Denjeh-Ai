@@ -19,6 +19,12 @@ function decodeBase64ToBytes(base64: string): Uint8Array {
   return bytes;
 }
 
+function bytesToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  return buffer;
+}
+
 function getFileExtension(mimeType: string): string {
   if (mimeType.includes("jpeg") || mimeType.includes("jpg")) return "jpg";
   if (mimeType.includes("webp")) return "webp";
@@ -122,6 +128,7 @@ export async function POST(req: NextRequest) {
     const mimeType = imagePart.inlineData.mimeType || "image/png";
     const ext = getFileExtension(mimeType);
     const fileBytes = decodeBase64ToBytes(imagePart.inlineData.data);
+    const uploadBuffer = bytesToArrayBuffer(fileBytes);
 
     const bucket = sanitizeSegment(body.bucket || process.env.SUPABASE_MEDIA_BUCKET || "dnaverse-media");
     const prefix = sanitizeSegment(body.filePrefix || body.taskId || "dnaverse-awakening");
@@ -138,7 +145,7 @@ export async function POST(req: NextRequest) {
         "Content-Type": mimeType,
         "x-upsert": "true",
       },
-      body: fileBytes,
+      body: uploadBuffer,
     });
 
     if (!uploadResponse.ok) {
