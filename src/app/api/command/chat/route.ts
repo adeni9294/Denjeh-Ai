@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 
-export const runtime = "edge";
-
 interface ChatTurn {
   role: "user" | "assistant";
   content: string;
@@ -25,8 +23,17 @@ Aturan utama:
 
 export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json()) as ChatRequestBody;
-    const directMessage = body.message?.trim() ?? "";
+    let body: ChatRequestBody = {};
+    try {
+      body = (await req.json()) as ChatRequestBody;
+    } catch {
+      return NextResponse.json(
+        { ok: false, error: "Format JSON permintaan tidak valid." },
+        { status: 400 }
+      );
+    }
+
+    const directMessage = typeof body.message === "string" ? body.message.trim() : "";
     const history = Array.isArray(body.messages) ? body.messages : [];
 
     const turns: ChatTurn[] =
@@ -51,10 +58,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const geminiApiKey = process.env.GEMINI_API_KEY;
+    const geminiApiKey = process.env.GEMINI_API_KEY?.trim();
     if (!geminiApiKey) {
       return NextResponse.json(
-        { ok: false, error: "GEMINI_API_KEY belum dikonfigurasi di environment." },
+        {
+          ok: false,
+          error:
+            "GEMINI_API_KEY belum terbaca di environment Cloudflare Worker / server.",
+        },
         { status: 500 }
       );
     }
@@ -66,65 +77,81 @@ export async function POST(req: NextRequest) {
 
     let lastError = "";
     for (const model of CHAT_MODELS) {
-      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
-        geminiApiKey
-      )}`;
+      try {
+        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
+          geminiApiKey
+        )}`;
 
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          systemInstruction: {
-            parts: [{ text: EASY_GOING_SYSTEM_PROMPT }],
-          },
-          contents,
-          generationConfig: {
-            temperature: 0.8,
-          },
-        }),
-      });
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            systemInstruction: {
+              parts: [{ text: EASY_GOING_SYSTEM_PROMPT }],
+            },
+            contents,
+            generationConfig: {
+              temperature: 0.8,
+            },
+          }),
+        });
 
-      if (!response.ok) {
-        lastError = await response.text();
-        continue;
+        const rawText = await response.text();
+        if (!response.ok) {
+          lastError = `${model} (${response.status}): ${rawText.slice(0, 240)}`;
+          continue;
+        }
+
+        let data: {
+          candidates?: Array<{
+            content?: {
+              parts?: Array<{ text?: string }>;
+            };
+          }>;
+        } = {};
+        try {
+          data = JSON.parse(rawText) as typeof data;
+        } catch {
+          lastError = `${model}: Respons Gemini bukan JSON valid.`;
+          continue;
+        }
+
+        const replyText = data.candidates?.[0]?.content?.parts
+          ?.map((part) => part.text ?? "")
+          .join("")
+          .trim();
+
+        if (!replyText) {
+          lastError = `${model}: Respons teks kosong.`;
+          continue;
+        }
+
+        return NextResponse.json({
+          ok: true,
+          reply: replyText,
+          modelUsed: model,
+          providerUsed: "gemini",
+        });
+      } catch (fetchErr) {
+        lastError =
+          fetchErr instanceof Error
+            ? `${model}: ${fetchErr.message}`
+            : `${model}: Gagal memanggil Gemini API.`;
       }
-
-      const data = (await response.json()) as {
-        candidates?: Array<{
-          content?: {
-            parts?: Array<{ text?: string }>;
-          };
-        }>;
-      };
-
-      const replyText = data.candidates?.[0]?.content?.parts
-        ?.map((part) => part.text ?? "")
-        .join("")
-        .trim();
-
-      if (!replyText) {
-        lastError = "Respons Gemini kosong.";
-        continue;
-      }
-
-      return NextResponse.json({
-        ok: true,
-        reply: replyText,
-        modelUsed: model,
-        providerUsed: "gemini",
-      });
     }
 
     return NextResponse.json(
       {
         ok: false,
-        error: `Gagal mendapatkan balasan obrolan dari Gemini: ${lastError}`,
+        error: `Gagal mendapatkan balasan obrolan: ${lastError || "Unknown error"}`,
       },
       { status: 502 }
     );
   } catch (error) {
     const message =
-      error instanceof Error ? error.message : "Terjadi kesalahan saat memproses obrolan.";
+      error instanceof Error
+        ? error.message
+        : "Terjadi kesalahan internal saat memproses obrolan.";
     return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
 }
