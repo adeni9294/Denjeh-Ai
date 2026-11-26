@@ -23,17 +23,28 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     defaultPriority: 1,
     suggestedModels: [
       {
+        modelIdentifier: "gemini-3.8-flash",
+        displayName: "Gemini 3.8 Flash",
+        capability: "text, vision, structured_json",
+      },
+      {
+        modelIdentifier: "gemini-3.5-flash-lite",
+        displayName: "Gemini 3.5 Flash Lite",
+        capability: "text, fast_draft, structured_json",
+      },
+      {
+        modelIdentifier: "gemini-3.5-flash",
+        displayName: "Gemini 3.5 Flash",
+        capability: "text, vision, structured_json",
+      },
+      {
         modelIdentifier: "gemini-2.5-flash",
         displayName: "Gemini 2.5 Flash",
         capability: "text, vision, structured_json",
       },
-      {
-        modelIdentifier: "gemini-2.0-flash",
-        displayName: "Gemini 2.0 Flash",
-        capability: "text, structured_json",
-      },
     ],
-    helperNote: "Gunakan API key gratis dari Google AI Studio dan pantau batas RPM/RPD free tier.",
+    helperNote:
+      "Gunakan API key gratis dari Google AI Studio dan pantau batas RPM/RPD free tier.",
   },
   {
     providerKey: "groq",
@@ -54,7 +65,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
         capability: "text, fast_draft",
       },
     ],
-    helperNote: "Cocok sebagai provider alternatif berkecepatan tinggi atau cadangan fallback.",
+    helperNote:
+      "Cocok sebagai provider alternatif berkecepatan tinggi atau cadangan fallback.",
   },
   {
     providerKey: "custom",
@@ -70,6 +82,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
         capability: "text",
       },
     ],
-    helperNote: "Tambahkan endpoint dan model tambahan tanpa mengubah arsitektur inti DENJEH AI.",
+    helperNote:
+      "Tambahkan endpoint dan model tambahan tanpa mengubah arsitektur inti DENJEH AI.",
   },
 ];
