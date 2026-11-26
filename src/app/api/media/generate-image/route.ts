@@ -52,11 +52,16 @@ async function resolveGeminiKey(
 async function generateImageBase64WithGemini(
   apiKey: string,
   prompt: string
-): Promise<{ base64: string; mimeType: string }> {
+): Promise<{ base64: string; mimeType: string; modelUsed: string }> {
   const errors: string[] = [];
 
-  // 1. Coba model Gemini native image generation via generateContent
-  const geminiImageModels = ["gemini-3.1-flash-image"];
+  // 1. Coba model Gemini image generation via generateContent
+  const geminiImageModels = [
+    "gemini-3.1-flash-lite-image",
+    "gemini-3.1-flash-image",
+    "gemini-3-pro-image",
+  ];
+
   for (const model of geminiImageModels) {
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
@@ -103,6 +108,7 @@ async function generateImageBase64WithGemini(
         return {
           base64: inline.data,
           mimeType: inline.mimeType || "image/png",
+          modelUsed: model,
         };
       }
 
@@ -154,6 +160,7 @@ async function generateImageBase64WithGemini(
         return {
           base64: pred.bytesBase64Encoded,
           mimeType: pred.mimeType || "image/png",
+          modelUsed: model,
         };
       }
 
@@ -228,7 +235,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { base64, mimeType } = await generateImageBase64WithGemini(
+    const { base64, mimeType, modelUsed } = await generateImageBase64WithGemini(
       apiKey,
       prompt
     );
@@ -283,6 +290,7 @@ export async function POST(req: NextRequest) {
       ok: true,
       imageUrl: uploadedPublicUrl,
       mimeType,
+      modelUsed,
     });
   } catch (err) {
     return NextResponse.json(
