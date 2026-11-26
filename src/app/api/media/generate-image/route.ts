@@ -1,12 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { getGeminiKey } from "@/lib/getEnv";
+import { getGeminiKey, getServerEnv } from "@/lib/getEnv";
 import { DbAiProvider } from "@/types/studio";
 
 interface GenerateImageBody {
   prompt?: string;
   taskId?: string;
   filePrefix?: string;
+}
+
+interface WorkersAiBinding {
+  run: (
+    model: string,
+    input: Record<string, unknown>
+  ) => Promise<unknown>;
 }
 
 function decodeStoredKey(encoded: string | null | undefined): string | null {
@@ -49,57 +56,168 @@ async function resolveGeminiKey(
   return "";
 }
 
-function buildCompactPollinationsPrompt(rawPrompt: string): string {
-  // Ringkas prompt panjang agar URL Pollinations tidak kepanjangan dan tetap deskriptif
+async function resolveWorkersAiBinding(): Promise<WorkersAiBinding | null> {
+  const env = await getServerEnv();
+  const candidate = (env as Record<string, unknown>).AI;
+  if (
+    candidate &&
+    typeof candidate === "object" &&
+    typeof (candidate as WorkersAiBinding).run === "function"
+  ) {
+    return candidate as WorkersAiBinding;
+  }
+  return null;
+}
+
+function buildCompactPrompt(rawPrompt: string): string {
   const singleLine = rawPrompt
     .replace(/\s+/g, " ")
     .replace(/===.*?===/g, " ")
     .trim();
-  return singleLine.slice(0, 650);
+  return singleLine.slice(0, 600);
 }
 
-async function generateImageBufferWithPollinations(
-  prompt: string
-): Promise<{ buffer: Buffer; mimeType: string; modelUsed: string }> {
-  const compactPrompt = buildCompactPollinationsPrompt(prompt);
-  const seed = Math.floor(Math.random() * 1000000);
-  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(
-    compactPrompt
-  )}?width=1280&height=720&nologo=true&seed=${seed}`;
-
-  const res = await fetch(url, {
-    method: "GET",
-    headers: {
-      Accept: "image/*,*/*;q=0.8",
-    },
-  });
-
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(
-      `Pollinations HTTP ${res.status}: ${errText.slice(0, 180) || "Gagal mengambil gambar"}`
-    );
+async function translatePromptToEnglishForImage(
+  apiKey: string,
+  rawPrompt: string
+): Promise<string> {
+  const cleanedSource = buildCompactPrompt(rawPrompt);
+  if (!apiKey) {
+    return cleanedSource;
   }
 
-  const contentType = res.headers.get("content-type") || "image/jpeg";
-  const arrBuf = await res.arrayBuffer();
-  const buffer = Buffer.from(arrBuf);
+  const textModels = [
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+  ];
 
-  if (buffer.byteLength < 1024) {
-    throw new Error("Pollinations mengembalikan data gambar terlalu kecil/kosong.");
+  const instruction = `Translate and refine the following Indonesian/mixed creative image prompt into a vivid, concise English image-generation prompt (max 110 words). Keep character appearance, costume, lighting, setting, camera angle, and mood clear. Output ONLY the English prompt without quotes or explanations.`;
+
+  for (const model of textModels) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
+        apiKey
+      )}`;
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{ text: instruction }],
+          },
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: cleanedSource }],
+            },
+          ],
+          generationConfig: {
+            temperature: 0.3,
+          },
+        }),
+      });
+
+      if (!res.ok) continue;
+
+      const data = (await res.json()) as {
+        candidates?: Array<{
+          content?: {
+            parts?: Array<{ text?: string }>;
+          };
+        }>;
+      };
+
+      const translated = data.candidates?.[0]?.content?.parts
+        ?.map((pt) => pt.text ?? "")
+        .join("")
+        .replace(/^["']|["']$/g, "")
+        .trim();
+
+      if (translated && translated.length >= 10) {
+        return translated.slice(0, 600);
+      }
+    } catch {
+      // Lanjut ke model teks berikutnya atau fallback prompt ringkas
+    }
+  }
+
+  return cleanedSource;
+}
+
+function extractImageBufferFromWorkersAi(rawOutput: unknown): Buffer | null {
+  if (!rawOutput) return null;
+
+  if (rawOutput instanceof Uint8Array || rawOutput instanceof ArrayBuffer) {
+    return Buffer.from(rawOutput as ArrayBuffer);
+  }
+
+  if (Array.isArray(rawOutput)) {
+    return Buffer.from(rawOutput);
+  }
+
+  if (typeof rawOutput === "object") {
+    const obj = rawOutput as Record<string, unknown>;
+    if (typeof obj.image === "string" && obj.image.trim().length > 0) {
+      return Buffer.from(obj.image.trim(), "base64");
+    }
+    if (obj.image instanceof Uint8Array || obj.image instanceof ArrayBuffer) {
+      return Buffer.from(obj.image as ArrayBuffer);
+    }
+  }
+
+  return null;
+}
+
+async function generateImageBufferWithWorkersAi(
+  aiBinding: WorkersAiBinding,
+  apiKey: string,
+  rawPrompt: string
+): Promise<{
+  buffer: Buffer;
+  mimeType: string;
+  modelUsed: string;
+  translatedPrompt: string;
+}> {
+  const englishPrompt = await translatePromptToEnglishForImage(
+    apiKey,
+    rawPrompt
+  );
+
+  const model = "@cf/black-forest-labs/flux-1-schnell";
+  const output = await aiBinding.run(model, {
+    prompt: englishPrompt,
+    width: 1280,
+    height: 720,
+    num_steps: 4,
+  });
+
+  const buffer = extractImageBufferFromWorkersAi(output);
+  if (!buffer || buffer.byteLength < 1024) {
+    throw new Error(
+      "Cloudflare Workers AI tidak mengembalikan data gambar yang valid."
+    );
   }
 
   return {
     buffer,
-    mimeType: contentType.startsWith("image/") ? contentType : "image/jpeg",
-    modelUsed: "pollinations-flux",
+    mimeType: "image/png",
+    modelUsed: "workers-ai/flux-1-schnell",
+    translatedPrompt: englishPrompt,
   };
 }
 
 async function generateImageWithFallback(
   apiKey: string,
+  aiBinding: WorkersAiBinding | null,
   prompt: string
-): Promise<{ buffer: Buffer; mimeType: string; modelUsed: string }> {
+): Promise<{
+  buffer: Buffer;
+  mimeType: string;
+  modelUsed: string;
+  translatedPrompt?: string;
+}> {
   const errors: string[] = [];
 
   if (apiKey) {
@@ -170,13 +288,19 @@ async function generateImageWithFallback(
     }
   }
 
-  try {
-    return await generateImageBufferWithPollinations(prompt);
-  } catch (polErr) {
+  if (aiBinding) {
+    try {
+      return await generateImageBufferWithWorkersAi(aiBinding, apiKey, prompt);
+    } catch (aiErr) {
+      errors.push(
+        aiErr instanceof Error
+          ? aiErr.message
+          : "Gagal memanggil Cloudflare Workers AI."
+      );
+    }
+  } else {
     errors.push(
-      polErr instanceof Error
-        ? polErr.message
-        : "Gagal mengambil gambar dari Pollinations.ai."
+      "Binding Workers AI ('AI') belum diaktifkan di konfigurasi Cloudflare Worker."
     );
   }
 
@@ -224,17 +348,18 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { data: providers } = await supabase
-      .from("ai_providers")
-      .select("*")
-      .eq("is_enabled", true)
-      .order("priority_order", { ascending: true });
+    const [{ data: providers }, aiBinding] = await Promise.all([
+      supabase
+        .from("ai_providers")
+        .select("*")
+        .eq("is_enabled", true)
+        .order("priority_order", { ascending: true }),
+      resolveWorkersAiBinding(),
+    ]);
 
     const apiKey = await resolveGeminiKey((providers as DbAiProvider[]) ?? []);
-    const { buffer, mimeType, modelUsed } = await generateImageWithFallback(
-      apiKey,
-      prompt
-    );
+    const { buffer, mimeType, modelUsed, translatedPrompt } =
+      await generateImageWithFallback(apiKey, aiBinding, prompt);
 
     const ext =
       mimeType.includes("jpeg") || mimeType.includes("jpg") ? "jpg" : "png";
@@ -286,6 +411,7 @@ export async function POST(req: NextRequest) {
       imageUrl: uploadedPublicUrl,
       mimeType,
       modelUsed,
+      translatedPrompt,
     });
   } catch (err) {
     return NextResponse.json(
