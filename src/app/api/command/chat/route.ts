@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { DbAiModel, DbAiProvider, DbMemory, DbProject } from "@/types/studio";
+import { getGeminiKey } from "@/lib/getEnv";
 
 interface ChatTurn {
   role: "user" | "assistant";
@@ -88,10 +89,7 @@ function findGeminiApiKey(
     }
   }
 
-  const envKey =
-    process.env.GEMINI_API_KEY?.trim() ||
-    process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim() ||
-    "";
+const envKey = await getGeminiKey();
 
   return { apiKey: envKey, preferredModel };
 }
