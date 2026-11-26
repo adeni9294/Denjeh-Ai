@@ -49,129 +49,135 @@ async function resolveGeminiKey(
   return "";
 }
 
-async function generateImageBase64WithGemini(
+function buildCompactPollinationsPrompt(rawPrompt: string): string {
+  // Ringkas prompt panjang agar URL Pollinations tidak kepanjangan dan tetap deskriptif
+  const singleLine = rawPrompt
+    .replace(/\s+/g, " ")
+    .replace(/===.*?===/g, " ")
+    .trim();
+  return singleLine.slice(0, 650);
+}
+
+async function generateImageBufferWithPollinations(
+  prompt: string
+): Promise<{ buffer: Buffer; mimeType: string; modelUsed: string }> {
+  const compactPrompt = buildCompactPollinationsPrompt(prompt);
+  const seed = Math.floor(Math.random() * 1000000);
+  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(
+    compactPrompt
+  )}?width=1280&height=720&nologo=true&seed=${seed}`;
+
+  const res = await fetch(url, {
+    method: "GET",
+    headers: {
+      Accept: "image/*,*/*;q=0.8",
+    },
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(
+      `Pollinations HTTP ${res.status}: ${errText.slice(0, 180) || "Gagal mengambil gambar"}`
+    );
+  }
+
+  const contentType = res.headers.get("content-type") || "image/jpeg";
+  const arrBuf = await res.arrayBuffer();
+  const buffer = Buffer.from(arrBuf);
+
+  if (buffer.byteLength < 1024) {
+    throw new Error("Pollinations mengembalikan data gambar terlalu kecil/kosong.");
+  }
+
+  return {
+    buffer,
+    mimeType: contentType.startsWith("image/") ? contentType : "image/jpeg",
+    modelUsed: "pollinations-flux",
+  };
+}
+
+async function generateImageWithFallback(
   apiKey: string,
   prompt: string
-): Promise<{ base64: string; mimeType: string; modelUsed: string }> {
+): Promise<{ buffer: Buffer; mimeType: string; modelUsed: string }> {
   const errors: string[] = [];
 
-  // 1. Coba model Gemini image generation via generateContent
-  const geminiImageModels = [
-    "gemini-3.1-flash-lite-image",
-    "gemini-3.1-flash-image",
-    "gemini-3-pro-image",
-  ];
+  if (apiKey) {
+    const geminiImageModels = [
+      "gemini-3.1-flash-lite-image",
+      "gemini-3.1-flash-image",
+      "gemini-3-pro-image",
+    ];
 
-  for (const model of geminiImageModels) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
-        apiKey
-      )}`;
+    for (const model of geminiImageModels) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
+          apiKey
+        )}`;
 
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: "user",
-              parts: [{ text: prompt }],
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [
+              {
+                role: "user",
+                parts: [{ text: prompt }],
+              },
+            ],
+            generationConfig: {
+              responseModalities: ["IMAGE", "TEXT"],
             },
-          ],
-          generationConfig: {
-            responseModalities: ["IMAGE", "TEXT"],
-          },
-        }),
-      });
+          }),
+        });
 
-      const rawText = await res.text();
-      if (!res.ok) {
-        errors.push(`${model} (${res.status}): ${rawText.slice(0, 180)}`);
-        continue;
-      }
+        const rawText = await res.text();
+        if (!res.ok) {
+          errors.push(`${model} (${res.status}): ${rawText.slice(0, 180)}`);
+          continue;
+        }
 
-      const parsed = JSON.parse(rawText) as {
-        candidates?: Array<{
-          content?: {
-            parts?: Array<{
-              inlineData?: { mimeType?: string; data?: string };
-            }>;
-          };
-        }>;
-      };
-
-      const inline = parsed.candidates?.[0]?.content?.parts?.find(
-        (pt) => pt.inlineData?.data
-      )?.inlineData;
-
-      if (inline?.data) {
-        return {
-          base64: inline.data,
-          mimeType: inline.mimeType || "image/png",
-          modelUsed: model,
+        const parsed = JSON.parse(rawText) as {
+          candidates?: Array<{
+            content?: {
+              parts?: Array<{
+                inlineData?: { mimeType?: string; data?: string };
+              }>;
+            };
+          }>;
         };
-      }
 
-      errors.push(`${model}: Tidak ada inlineData pada respons.`);
-    } catch (err) {
-      errors.push(
-        err instanceof Error
-          ? `${model}: ${err.message}`
-          : `${model}: Gagal memanggil Gemini Image API.`
-      );
+        const inline = parsed.candidates?.[0]?.content?.parts?.find(
+          (pt) => pt.inlineData?.data
+        )?.inlineData;
+
+        if (inline?.data) {
+          return {
+            buffer: Buffer.from(inline.data, "base64"),
+            mimeType: inline.mimeType || "image/png",
+            modelUsed: model,
+          };
+        }
+
+        errors.push(`${model}: Tidak ada inlineData pada respons.`);
+      } catch (err) {
+        errors.push(
+          err instanceof Error
+            ? `${model}: ${err.message}`
+            : `${model}: Gagal memanggil Gemini Image API.`
+        );
+      }
     }
   }
 
-  // 2. Fallback ke Imagen REST endpoint (:predict)
-  const imagenModels = ["imagen-3.0-generate-002", "imagen-4.0-generate-001"];
-  for (const model of imagenModels) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:predict?key=${encodeURIComponent(
-        apiKey
-      )}`;
-
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          instances: [{ prompt }],
-          parameters: {
-            sampleCount: 1,
-            aspectRatio: "16:9",
-          },
-        }),
-      });
-
-      const rawText = await res.text();
-      if (!res.ok) {
-        errors.push(`${model} (${res.status}): ${rawText.slice(0, 180)}`);
-        continue;
-      }
-
-      const parsed = JSON.parse(rawText) as {
-        predictions?: Array<{
-          bytesBase64Encoded?: string;
-          mimeType?: string;
-        }>;
-      };
-
-      const pred = parsed.predictions?.[0];
-      if (pred?.bytesBase64Encoded) {
-        return {
-          base64: pred.bytesBase64Encoded,
-          mimeType: pred.mimeType || "image/png",
-          modelUsed: model,
-        };
-      }
-
-      errors.push(`${model}: Tidak ada bytesBase64Encoded pada respons.`);
-    } catch (err) {
-      errors.push(
-        err instanceof Error
-          ? `${model}: ${err.message}`
-          : `${model}: Gagal memanggil Imagen API.`
-      );
-    }
+  try {
+    return await generateImageBufferWithPollinations(prompt);
+  } catch (polErr) {
+    errors.push(
+      polErr instanceof Error
+        ? polErr.message
+        : "Gagal mengambil gambar dari Pollinations.ai."
+    );
   }
 
   throw new Error(
@@ -225,22 +231,11 @@ export async function POST(req: NextRequest) {
       .order("priority_order", { ascending: true });
 
     const apiKey = await resolveGeminiKey((providers as DbAiProvider[]) ?? []);
-    if (!apiKey) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "API key Gemini tidak ditemukan untuk membuat gambar.",
-        },
-        { status: 500 }
-      );
-    }
-
-    const { base64, mimeType, modelUsed } = await generateImageBase64WithGemini(
+    const { buffer, mimeType, modelUsed } = await generateImageWithFallback(
       apiKey,
       prompt
     );
 
-    const bytes = Buffer.from(base64, "base64");
     const ext =
       mimeType.includes("jpeg") || mimeType.includes("jpg") ? "jpg" : "png";
     const safePrefix = (body.filePrefix || "dnaverse")
@@ -255,7 +250,7 @@ export async function POST(req: NextRequest) {
     for (const bucket of bucketsToTry) {
       const { error: uploadErr } = await supabase.storage
         .from(bucket)
-        .upload(filePath, bytes, {
+        .upload(filePath, buffer, {
           contentType: mimeType,
           upsert: true,
         });
