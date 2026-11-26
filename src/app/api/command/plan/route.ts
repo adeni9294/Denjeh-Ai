@@ -9,6 +9,39 @@ import {
   TaskStatus,
 } from "@/types/studio";
 
+type TaskDivision = "text" | "story" | "photo" | "reels";
+
+function inferStepDivision(params: {
+  agentCode: string;
+  action: string;
+  instruction: string;
+  estimatedOutput: string;
+}): TaskDivision {
+  const code = params.agentCode.toLowerCase().trim();
+  if (code === "photo") return "photo";
+  if (code === "story") return "story";
+  if (code === "reels" || code === "video") return "reels";
+  if (code === "text") return "text";
+
+  const combined =
+    `${params.action} ${params.instruction} ${params.estimatedOutput}`.toLowerCase();
+
+  if (/\b(reels|video|klip|durasi|detik|adegan)\b/.test(combined)) {
+    return "reels";
+  }
+  if (/\b(story|teaser)\b/.test(combined)) {
+    return "story";
+  }
+  if (
+    /\b(foto|photo|gambar|image|visual|ilustrasi|poster|banner)\b/.test(
+      combined
+    )
+  ) {
+    return "photo";
+  }
+  return "text";
+}
+
 export async function POST(req: NextRequest) {
   try {
     const supabase = await createSupabaseServerClient();
@@ -86,19 +119,22 @@ export async function POST(req: NextRequest) {
 Tugas Anda adalah memahami instruksi pengguna, membaca memori proyek, lalu menyusun rencana eksekusi multi-agen dalam format JSON murni.
 
 Daftar agen resmi yang tersedia:
-- idea (Idea Agent): konsep & ide kreatif
-- research (Research Agent): riset & referensi
-- story (Story Agent): naskah, narasi, struktur cerita
-- character (Character Agent): profil karakter & kontinuitas
-- visual (Visual Agent): arahan visual & image prompt
-- video (Video Agent): menyusun 1 master prompt utuh per klip (menggabungkan cerita/adegan, lokasi, karakter & kontinuitas, aksi per detik di klip tersebut, pencahayaan/kamera, serta dialog) dengan durasi yang patuh ketat pada instruksi pengguna
-- marketing (Marketing Agent): caption, hashtag, jadwal distribusi
-- publishing (Publishing Agent): kesiapan rilis platform sosial
-- quality (Quality Agent): evaluasi kualitas & audit kontinuitas sebelum selesai
+- text (Text Agent): menyusun konten teks, postingan, opini/edukasi, hook, dan narasi tulisan
+- story (Story Agent): menyusun konsep dan teks singkat padat untuk Story lengkap dengan elemen interaksi
+- photo (Photo Agent): menyusun konsep gambar tunggal, komposisi, pencahayaan, dan prompt gambar statis
+- reels (Reels Agent): khusus konten video pendek/reels — hook cepat, alur adegan, dan prompt klip sesuai durasi yang diminta
+- idea (Idea Agent): konsep & sudut pandang kreatif
+- research (Research Agent): riset & referensi pendukung
+- marketing (Marketing Agent): caption, tagar, dan jadwal distribusi
+- publishing (Publishing Agent): kesiapan rilis ke kanal sosial
+- quality (Quality Agent): audit kualitas & kesesuaian format
 
-ATURAN WAJIB KEPATUHAN DURASI & MASTER PROMPT KLIP:
-1. Jika pengguna menetapkan durasi spesifik per klip (misalnya "setiap klip 10s" atau "10 detik"), WAJIB terapkan durasi yang sama persis pada setiap klip (misal 0-10s, 10-20s, 20-30s, dst.) dan sesuaikan jumlah klip dengan total durasi yang diminta. DILARANG mencampur durasi berbeda (seperti 10s dan 12s) kecuali pengguna secara eksplisit meminta durasi bervariasi.
-2. Pada langkah Video Agent, instruksikan agar setiap klip disajikan sebagai SATU master prompt utuh yang menyatukan cerita/adegan, lokasi, karakter/kostum, rincian aksi per detik di dalam klip tersebut, sudut kamera/pencahayaan, serta dialog (bukan dipecah menjadi prompt terpisah per elemen).
+ATURAN PEMILIHAN AGEN BERDASARKAN JENIS KONTEN:
+1. Jika pengguna meminta konten FOTO / GAMBAR / VISUAL (misalnya "buatkan konten foto"): jadikan "photo" (Photo Agent) sebagai agen utama, dan tambahkan "marketing" atau "publishing" hanya jika pengguna juga meminta caption/publikasi. JANGAN menyertakan "reels" atau langkah durasi klip video.
+2. Jika pengguna meminta konten TEKS / POSTINGAN: jadikan "text" (Text Agent) sebagai agen utama.
+3. Jika pengguna meminta konten STORY: jadikan "story" (Story Agent) sebagai agen utama.
+4. Jika pengguna meminta konten REELS / VIDEO: jadikan "reels" (Reels Agent) sebagai agen utama dan patuhi durasi klip yang diminta pengguna secara konsisten.
+5. Jika pengguna meminta kombinasi beberapa format (teks, story, foto, reels): buat langkah hanya untuk format yang diminta.
 
 WAJIB kembalikan JSON valid dengan skema persis seperti ini (bahasa Indonesia untuk deskripsi langkah):
 {
@@ -107,8 +143,8 @@ WAJIB kembalikan JSON valid dengan skema persis seperti ini (bahasa Indonesia un
   "steps": [
     {
       "stepNumber": 1,
-      "agentCode": "story",
-      "agentName": "Story Agent",
+      "agentCode": "photo",
+      "agentName": "Photo Agent",
       "action": "Penjelasan tugas spesifik untuk agen ini",
       "dependsOn": "Project Memory",
       "estimatedOutput": "Jenis artefak yang dihasilkan"
@@ -150,7 +186,7 @@ ${
   body.previousPlanSummary
     ? `KONTEKS RENCANA SEBELUMNYA (UNTUK REVISI LANJUTAN):\n${body.previousPlanSummary}\n`
     : ""
-}INSTRUKSI PENGGUNA (PATUHI ANGKA DURASI KLIP SECARA KONSISTEN):
+}INSTRUKSI PENGGUNA:
 ${instruction}`;
 
     // 3. Panggil AI Cloud
@@ -237,6 +273,17 @@ ${instruction}`;
         const initialStatus: TaskStatus =
           mode === "autonomous" && idx === 0 ? "running" : "awaiting_approval";
         const clampedPriority = Math.min(10, Math.max(1, stepOrder));
+        const normalizedAgentCode = String(step.agentCode || "text")
+          .toLowerCase()
+          .trim();
+        const mappedAgentCode =
+          normalizedAgentCode === "video" ? "reels" : normalizedAgentCode;
+        const division = inferStepDivision({
+          agentCode: mappedAgentCode,
+          action: step.action,
+          instruction,
+          estimatedOutput: step.estimatedOutput,
+        });
 
         return {
           workflow_run_id: savedRun.id,
@@ -250,8 +297,9 @@ ${instruction}`;
           input_payload: {
             stepOrder,
             instruction: step.action,
-            agentCode: step.agentCode || "story",
+            agentCode: mappedAgentCode,
             agentName: step.agentName,
+            division,
             dependsOn: step.dependsOn,
             estimatedOutput: step.estimatedOutput,
             intentSummary: planResult.intentSummary,
