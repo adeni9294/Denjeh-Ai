@@ -444,11 +444,18 @@ export function CommandWorkspace() {
           }),
         });
 
-        const data = (await res.json()) as {
-          ok?: boolean;
-          error?: string;
-          run?: { id: string };
-        };
+        const rawText = await res.text();
+        let data: { ok?: boolean; error?: string; run?: { id: string } } = {};
+        try {
+          data = JSON.parse(rawText) as typeof data;
+        } catch {
+          setErrorMsg(
+            rawText.trim()
+              ? `Respons server (${res.status}): ${rawText.trim().slice(0, 200)}`
+              : `Gagal menyetujui rencana (HTTP ${res.status}).`
+          );
+          return;
+        }
 
         if (!res.ok) {
           setErrorMsg(data.error ?? "Gagal menyetujui dan menyimpan rencana.");
@@ -489,7 +496,19 @@ export function CommandWorkspace() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ preferredModel }),
       });
-      const data = (await res.json()) as { ok?: boolean; error?: string };
+      const rawText = await res.text();
+      let data: { ok?: boolean; error?: string } = {};
+      try {
+        data = JSON.parse(rawText) as typeof data;
+      } catch {
+        setErrorMsg(
+          rawText.trim()
+            ? `Respons server (${res.status}): ${rawText.trim().slice(0, 200)}`
+            : `Gagal mengeksekusi agen (HTTP ${res.status}).`
+        );
+        return;
+      }
+
       if (!res.ok) {
         setErrorMsg(data.error ?? "Gagal mengeksekusi agen.");
         return;
@@ -551,10 +570,18 @@ export function CommandWorkspace() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ preferredModel }),
         });
-        const resultData = (await res.json()) as {
-          ok?: boolean;
-          error?: string;
-        };
+        const rawText = await res.text();
+        let resultData: { ok?: boolean; error?: string } = {};
+        try {
+          resultData = JSON.parse(rawText) as typeof resultData;
+        } catch {
+          resultData = {
+            ok: false,
+            error: rawText.trim()
+              ? `Respons server (${res.status}): ${rawText.trim().slice(0, 200)}`
+              : `Gagal menjalankan langkah (HTTP ${res.status}).`,
+          };
+        }
 
         await loadHistoryAndTasks(selectedProject);
 
@@ -728,21 +755,32 @@ export function CommandWorkspace() {
           }),
         });
 
-        const data = (await res.json()) as {
+        const rawText = await res.text();
+        let data: {
           ok?: boolean;
           reply?: string;
           content?: string;
           modelUsed?: string;
           providerUsed?: string;
           error?: string;
-        };
+        } = {};
 
-        if (!res.ok) {
+        try {
+          data = JSON.parse(rawText) as typeof data;
+        } catch {
+          setErrorMsg(
+            rawText.trim()
+              ? `Respons server (${res.status}): ${rawText.trim().slice(0, 200)}`
+              : `Endpoint /api/command/chat mengembalikan respons kosong (HTTP ${res.status}).`
+          );
+          return;
+        }
+
+        if (!res.ok || data.ok === false) {
           setErrorMsg(
             data.error ??
-              "Endpoint /api/command/chat belum tersedia atau gagal merespons."
+              `Endpoint /api/command/chat belum tersedia atau gagal merespons (HTTP ${res.status}).`
           );
-          setSubmitting(false);
           return;
         }
 
@@ -793,7 +831,8 @@ export function CommandWorkspace() {
         }),
       });
 
-      const data = (await res.json()) as {
+      const rawText = await res.text();
+      let data: {
         ok?: boolean;
         error?: string;
         loadedMemoryCount?: number;
@@ -811,13 +850,23 @@ export function CommandWorkspace() {
           providerUsed: string;
           modelUsed: string;
         };
-      };
+      } = {};
+
+      try {
+        data = JSON.parse(rawText) as typeof data;
+      } catch {
+        setErrorMsg(
+          rawText.trim()
+            ? `Respons server (${res.status}): ${rawText.trim().slice(0, 200)}`
+            : `Gagal memproses instruksi di Master Orchestrator (HTTP ${res.status}).`
+        );
+        return;
+      }
 
       if (!res.ok || !data.planResult) {
         setErrorMsg(
           data.error ?? "Gagal memproses instruksi di Master Orchestrator."
         );
-        setSubmitting(false);
         return;
       }
 
