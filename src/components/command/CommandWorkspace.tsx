@@ -32,6 +32,8 @@ import {
   BookmarkPlus,
   Trash2,
   Terminal,
+  MessageSquare,
+  Plus,
 } from "lucide-react";
 
 interface AttachmentRef {
@@ -50,6 +52,8 @@ type TaskWithPayloads = DbTask & {
   output_payload?: Record<string, unknown> | null;
   progress?: number | null;
 };
+
+type WorkspaceMode = "chat" | "orchestrator";
 
 function getPreferredModelForTask(task?: TaskWithPayloads): string | undefined {
   try {
@@ -101,6 +105,7 @@ function triggerMarkdownDownload(filename: string, markdown: string) {
 export function CommandWorkspace() {
   const searchParams = useSearchParams();
   const [activeTab, setActiveTab] = useState<"command" | "history">("command");
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("chat");
   const [projects, setProjects] = useState<DbProject[]>([]);
   const [selectedProject, setSelectedProject] = useState<string>("");
   const [mode, setMode] = useState<"manual" | "autonomous">("manual");
@@ -221,12 +226,14 @@ export function CommandWorkspace() {
     const initialQuery = searchParams.get("q");
     if (initialQuery) {
       setInput(initialQuery);
+      setWorkspaceMode("orchestrator");
     }
   }, [searchParams]);
 
   const handleOpenHistoryRun = async (run: DbWorkflowRun) => {
     setActiveRunId(run.id);
     setActiveTab("command");
+    setWorkspaceMode("orchestrator");
     const supabase = createSupabaseBrowserClient();
     const { data } = await supabase
       .from("tasks")
@@ -674,8 +681,8 @@ export function CommandWorkspace() {
     setAttachments((prev) => prev.filter((_, idx) => idx !== index));
   };
 
-  const handleSendCommand = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSendCommand = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     const trimmed = input.trim();
     if (!trimmed || submitting) return;
 
@@ -699,20 +706,81 @@ export function CommandWorkspace() {
           : trimmed,
     };
 
-    const lastOrchestratorMsg = [...messages]
-      .reverse()
-      .find((m) => m.sender === "orchestrator" && m.plan);
-
-    const previousPlanSummary = lastOrchestratorMsg
-      ? `${lastOrchestratorMsg.content}\nLangkah sebelumnya: ${lastOrchestratorMsg.plan
-          ?.map((s) => `${s.stepNumber}. ${s.agentName}: ${s.action}`)
-          .join("; ")}`
-      : undefined;
-
-    setMessages((prev) => [...prev, userMsg]);
+    const nextMessages = [...messages, userMsg];
+    setMessages(nextMessages);
     setInput("");
 
     try {
+      if (workspaceMode === "chat") {
+        const chatHistory = nextMessages.slice(-12).map((m) => ({
+          role: m.sender === "user" ? "user" : "assistant",
+          content: m.content,
+        }));
+
+        const res = await fetch("/api/command/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            projectId: selectedProject || undefined,
+            message: trimmed,
+            messages: chatHistory,
+            attachments,
+          }),
+        });
+
+        const data = (await res.json()) as {
+          ok?: boolean;
+          reply?: string;
+          content?: string;
+          modelUsed?: string;
+          providerUsed?: string;
+          error?: string;
+        };
+
+        if (!res.ok) {
+          setErrorMsg(
+            data.error ??
+              "Endpoint /api/command/chat belum tersedia atau gagal merespons."
+          );
+          setSubmitting(false);
+          return;
+        }
+
+        const replyText =
+          data.reply ||
+          data.content ||
+          "Siap, ada yang ingin kita bahas atau eksplorasi lebih lanjut?";
+
+        const assistantMsg: CommandMessage = {
+          id: `msg-${Date.now() + 1}`,
+          sender: "orchestrator",
+          timestamp: `${nowLabel} WIB`,
+          mode,
+          requiresApproval: false,
+          approved: true,
+          content:
+            data.modelUsed || data.providerUsed
+              ? `${replyText}\n\n— ${data.modelUsed ?? "AI"} ${
+                  data.providerUsed ? `(${data.providerUsed})` : ""
+                }`
+              : replyText,
+        };
+
+        setMessages((prev) => [...prev, assistantMsg]);
+        setAttachments([]);
+        return;
+      }
+
+      const lastOrchestratorMsg = [...messages]
+        .reverse()
+        .find((m) => m.sender === "orchestrator" && m.plan);
+
+      const previousPlanSummary = lastOrchestratorMsg
+        ? `${lastOrchestratorMsg.content}\nLangkah sebelumnya: ${lastOrchestratorMsg.plan
+            ?.map((s) => `${s.stepNumber}. ${s.agentName}: ${s.action}`)
+            .join("; ")}`
+        : undefined;
+
       const res = await fetch("/api/command/plan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -799,6 +867,7 @@ export function CommandWorkspace() {
   };
 
   const handleRequestRevision = (stepTitle: string) => {
+    setWorkspaceMode("orchestrator");
     setInput(`Revisi bagian "${stepTitle}": `);
   };
 
@@ -841,8 +910,8 @@ export function CommandWorkspace() {
       {isLoggedIn === false && (
         <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-xs text-amber-300 flex flex-wrap items-center justify-between gap-2">
           <span>
-            Anda belum login. Silakan masuk terlebih dahulu agar Master
-            Orchestrator dapat mengakses proyek, memori, dan API key Anda.
+            Anda belum login. Silakan masuk terlebih dahulu agar Command Center
+            dapat mengakses proyek, memori, dan API key Anda.
           </span>
           <Link
             href="/login"
@@ -857,7 +926,7 @@ export function CommandWorkspace() {
         <div className="flex items-start gap-2.5 rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 text-xs text-rose-400">
           <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
           <div className="space-y-1">
-            <p className="font-semibold">Gagal Memproses Orkestrasi</p>
+            <p className="font-semibold">Gagal Memproses Permintaan</p>
             <p>{errorMsg}</p>
             <Link
               href="/providers"
@@ -882,7 +951,7 @@ export function CommandWorkspace() {
               }`}
             >
               <Terminal className="h-3.5 w-3.5" />
-              <span>Command</span>
+              <span>Workspace</span>
             </button>
             <button
               type="button"
@@ -895,6 +964,33 @@ export function CommandWorkspace() {
             >
               <History className="h-3.5 w-3.5" />
               <span>History ({historyRuns.length})</span>
+            </button>
+          </div>
+
+          <div className="inline-flex rounded-xl border border-slate-200 dark:border-studio-border bg-slate-100 dark:bg-studio-navy p-1">
+            <button
+              type="button"
+              onClick={() => setWorkspaceMode("chat")}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                workspaceMode === "chat"
+                  ? "bg-emerald-600 text-white"
+                  : "text-slate-600 dark:text-slate-400"
+              }`}
+            >
+              <MessageSquare className="h-3.5 w-3.5" />
+              <span>Obrolan Santai</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setWorkspaceMode("orchestrator")}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                workspaceMode === "orchestrator"
+                  ? "bg-purple-600 text-white"
+                  : "text-slate-600 dark:text-slate-400"
+              }`}
+            >
+              <Bot className="h-3.5 w-3.5" />
+              <span>Orchestrator (DAG)</span>
             </button>
           </div>
 
@@ -924,34 +1020,53 @@ export function CommandWorkspace() {
           </select>
         </div>
 
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-slate-500 dark:text-slate-400">
-            Mode:
-          </span>
-          <div className="inline-flex rounded-xl border border-slate-200 dark:border-studio-border bg-slate-100 dark:bg-studio-navy p-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          {messages.length > 0 && (
             <button
               type="button"
-              onClick={() => setMode("manual")}
-              className={`rounded-lg px-3 py-1 text-xs font-medium transition ${
-                mode === "manual"
-                  ? "bg-blue-600 text-white"
-                  : "text-slate-600 dark:text-slate-400"
-              }`}
+              onClick={() => {
+                setMessages([]);
+                setActiveRunId(null);
+                setErrorMsg(null);
+              }}
+              className="inline-flex items-center gap-1 rounded-xl border border-slate-300 dark:border-studio-border bg-slate-100 dark:bg-studio-navy px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-300 hover:border-blue-500/40"
             >
-              Manual (Approval)
+              <Plus className="h-3.5 w-3.5" />
+              <span>Obrolan Baru</span>
             </button>
-            <button
-              type="button"
-              onClick={() => setMode("autonomous")}
-              className={`rounded-lg px-3 py-1 text-xs font-medium transition ${
-                mode === "autonomous"
-                  ? "bg-purple-600 text-white"
-                  : "text-slate-600 dark:text-slate-400"
-              }`}
-            >
-              Autonomous
-            </button>
-          </div>
+          )}
+
+          {workspaceMode === "orchestrator" && (
+            <>
+              <span className="text-xs text-slate-500 dark:text-slate-400">
+                Eksekusi:
+              </span>
+              <div className="inline-flex rounded-xl border border-slate-200 dark:border-studio-border bg-slate-100 dark:bg-studio-navy p-1">
+                <button
+                  type="button"
+                  onClick={() => setMode("manual")}
+                  className={`rounded-lg px-3 py-1 text-xs font-medium transition ${
+                    mode === "manual"
+                      ? "bg-blue-600 text-white"
+                      : "text-slate-600 dark:text-slate-400"
+                  }`}
+                >
+                  Manual
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMode("autonomous")}
+                  className={`rounded-lg px-3 py-1 text-xs font-medium transition ${
+                    mode === "autonomous"
+                      ? "bg-purple-600 text-white"
+                      : "text-slate-600 dark:text-slate-400"
+                  }`}
+                >
+                  Autonomous
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -969,7 +1084,7 @@ export function CommandWorkspace() {
               onClick={() => setActiveTab("command")}
               className="text-xs font-medium text-blue-400 hover:underline"
             >
-              Kembali ke Tab Command →
+              Kembali ke Workspace →
             </button>
           </div>
 
@@ -1063,29 +1178,62 @@ export function CommandWorkspace() {
           <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-5 min-h-[260px] max-h-[54vh] overflow-y-auto">
             {messages.length === 0 ? (
               <div className="py-8 text-center space-y-3 max-w-xl mx-auto">
-                <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-500/15 text-blue-400">
-                  <Bot className="h-6 w-6" />
+                <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-500/15 text-emerald-400">
+                  {workspaceMode === "chat" ? (
+                    <MessageSquare className="h-6 w-6" />
+                  ) : (
+                    <Bot className="h-6 w-6" />
+                  )}
                 </div>
                 <h3 className="text-base font-semibold">
-                  Master Orchestrator Siap
+                  {workspaceMode === "chat"
+                    ? "Ngobrol Santai & Tanya-Jawab"
+                    : "Master Orchestrator Siap"}
                 </h3>
                 <p className="text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-                  Riwayat perintah kini tersimpan rapi di tab{" "}
-                  <strong className="text-purple-300">History</strong> agar
-                  tampilan workspace tetap ringkas. Klik riwayat kapan saja untuk
-                  membukanya kembali.
+                  {workspaceMode === "chat"
+                    ? "Tanya apa saja, lempar ide adegan atau fitur, atau diskusi santai dua arah seperti di Gemini/ChatGPT. Kalau siap eksekusi berantai, tinggal pindah ke mode Orchestrator (DAG)."
+                    : "Riwayat perintah tersimpan rapi di tab History. Susun rencana DAG multi-agen untuk mengeksekusi tugas secara terstruktur."}
                 </p>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setInput(
-                      "Buat film pendek live-action fantasy action 60 detik untuk DNAverse. Kembangkan cerita, profil karakter, storyboard, arahan visual, prompt video yang dibagi menjadi klip 10-15 detik, caption media sosial, serta saran jadwal publikasi."
-                    )
-                  }
-                  className="rounded-xl border border-blue-500/30 bg-blue-500/10 px-3.5 py-2 text-xs font-medium text-blue-400 hover:bg-blue-500/20"
-                >
-                  Gunakan Contoh Perintah DNAverse 60 Detik
-                </button>
+
+                {workspaceMode === "chat" ? (
+                  <div className="flex flex-wrap justify-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setInput(
+                          "Halo, lagi mikirin hook pembuka buat konten DNAverse — The Awakening. Menurutmu enaknya mulai dari mana?"
+                        )
+                      }
+                      className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-500/20"
+                    >
+                      Brainstorming Hook Konten
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setInput(
+                          "Coba jelaskan perbedaan alur posting teks vs foto di Facebook Page dengan bahasa santai."
+                        )
+                      }
+                      className="rounded-xl border border-blue-500/30 bg-blue-500/10 px-3 py-1.5 text-xs font-medium text-blue-300 hover:bg-blue-500/20"
+                    >
+                      Tanya-Jawab Alur Posting
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setInput(
+                        "Buat film pendek live-action fantasy action 60 detik untuk DNAverse. Kembangkan cerita, profil karakter, storyboard, arahan visual, prompt video yang dibagi menjadi klip 10-15 detik, caption media sosial, serta saran jadwal publikasi."
+                      )
+                    }
+                    className="rounded-xl border border-blue-500/30 bg-blue-500/10 px-3.5 py-2 text-xs font-medium text-blue-400 hover:bg-blue-500/20"
+                  >
+                    Gunakan Contoh Perintah DNAverse 60 Detik
+                  </button>
+                )}
               </div>
             ) : (
               messages.map((msg) => (
@@ -1120,6 +1268,8 @@ export function CommandWorkspace() {
                       <span className="font-semibold">
                         {msg.sender === "user"
                           ? "Anda"
+                          : workspaceMode === "chat"
+                          ? "Asisten DENJEH"
                           : "Master Orchestrator"}
                       </span>
                       <span>{msg.timestamp}</span>
@@ -1240,7 +1390,17 @@ export function CommandWorkspace() {
               rows={3}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Tulis instruksi kreatif atau permintaan revisi lanjutan ke Master Orchestrator..."
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void handleSendCommand();
+                }
+              }}
+              placeholder={
+                workspaceMode === "chat"
+                  ? "Ngobrol santai atau tanya apa saja... (Enter untuk kirim, Shift+Enter baris baru)"
+                  : "Tulis instruksi kreatif atau permintaan revisi lanjutan ke Master Orchestrator..."
+              }
               className="w-full resize-none rounded-xl border border-slate-200 dark:border-studio-border bg-slate-50 dark:bg-studio-navy px-3.5 py-2.5 text-sm focus:border-blue-500 focus:outline-none"
             />
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1262,221 +1422,231 @@ export function CommandWorkspace() {
                 className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 px-5 py-2.5 text-sm font-semibold text-white hover:opacity-95 disabled:opacity-50"
               >
                 <span>
-                  {submitting ? "Menyusun Rencana..." : "Kirim Instruksi"}
+                  {submitting
+                    ? workspaceMode === "chat"
+                      ? "Membalas..."
+                      : "Menyusun Rencana..."
+                    : workspaceMode === "chat"
+                    ? "Kirim Pesan"
+                    : "Kirim Instruksi"}
                 </span>
                 <Send className="h-4 w-4" />
               </button>
             </div>
           </form>
 
-          {isLoggedIn && visibleTasks.length > 0 && (
-            <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <div className="flex items-center gap-2">
-                  <ListChecks className="h-5 w-5 text-emerald-400" />
-                  <h2 className="text-base font-semibold">
-                    Antrean Tugas Orkestrasi ({visibleTasks.length})
-                  </h2>
+          {workspaceMode === "orchestrator" &&
+            isLoggedIn &&
+            visibleTasks.length > 0 && (
+              <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <ListChecks className="h-5 w-5 text-emerald-400" />
+                    <h2 className="text-base font-semibold">
+                      Antrean Tugas Orkestrasi ({visibleTasks.length})
+                    </h2>
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {visibleTasks.some((t) => t.status === "completed") && (
+                      <button
+                        type="button"
+                        onClick={handleExportAllPackage}
+                        className="inline-flex items-center gap-1 rounded-lg border border-blue-500/30 bg-blue-500/15 px-3 py-1 text-[11px] font-semibold text-blue-300 hover:bg-blue-500/25"
+                      >
+                        <Download className="h-3 w-3" />
+                        <span>Ekspor Paket .md</span>
+                      </button>
+                    )}
+                    {visibleTasks.some((t) => t.status !== "completed") && (
+                      <button
+                        type="button"
+                        disabled={runningChain || Boolean(runningTaskId)}
+                        onClick={handleRunChain}
+                        className="rounded-lg bg-gradient-to-r from-purple-600 to-blue-600 px-3 py-1 text-[11px] font-semibold text-white hover:opacity-95 disabled:opacity-50"
+                      >
+                        {runningChain
+                          ? "Menjalankan Berantai..."
+                          : "Jalankan Berantai"}
+                      </button>
+                    )}
+                    <Badge variant="emerald">Tersimpan di PostgreSQL</Badge>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  {visibleTasks.some((t) => t.status === "completed") && (
-                    <button
-                      type="button"
-                      onClick={handleExportAllPackage}
-                      className="inline-flex items-center gap-1 rounded-lg border border-blue-500/30 bg-blue-500/15 px-3 py-1 text-[11px] font-semibold text-blue-300 hover:bg-blue-500/25"
-                    >
-                      <Download className="h-3 w-3" />
-                      <span>Ekspor Paket .md</span>
-                    </button>
-                  )}
-                  {visibleTasks.some((t) => t.status !== "completed") && (
-                    <button
-                      type="button"
-                      disabled={runningChain || Boolean(runningTaskId)}
-                      onClick={handleRunChain}
-                      className="rounded-lg bg-gradient-to-r from-purple-600 to-blue-600 px-3 py-1 text-[11px] font-semibold text-white hover:opacity-95 disabled:opacity-50"
-                    >
-                      {runningChain
-                        ? "Menjalankan Berantai..."
-                        : "Jalankan Berantai"}
-                    </button>
-                  )}
-                  <Badge variant="emerald">Tersimpan di PostgreSQL</Badge>
-                </div>
-              </div>
 
-              <div className="space-y-2">
-                {visibleTasks.map((t) => {
-                  const payload = (t.input_payload ?? {}) as Record<
-                    string,
-                    unknown
-                  >;
-                  const out = (t.output_payload ?? {}) as Record<
-                    string,
-                    unknown
-                  >;
-                  const stepOrder = Number(
-                    payload.stepOrder ?? t.step_order ?? 1
-                  );
-                  const instructionText = String(
-                    payload.instruction ?? t.instruction ?? ""
-                  );
-                  const isRunningThis = runningTaskId === t.id;
-                  const isCopiedThis = copiedTaskId === t.id;
-                  const isSavingMemThis = savingMemoryTaskId === t.id;
-                  const isSavedMemThis = Boolean(savedMemoryTaskIds[t.id]);
+                <div className="space-y-2">
+                  {visibleTasks.map((t) => {
+                    const payload = (t.input_payload ?? {}) as Record<
+                      string,
+                      unknown
+                    >;
+                    const out = (t.output_payload ?? {}) as Record<
+                      string,
+                      unknown
+                    >;
+                    const stepOrder = Number(
+                      payload.stepOrder ?? t.step_order ?? 1
+                    );
+                    const instructionText = String(
+                      payload.instruction ?? t.instruction ?? ""
+                    );
+                    const isRunningThis = runningTaskId === t.id;
+                    const isCopiedThis = copiedTaskId === t.id;
+                    const isSavingMemThis = savingMemoryTaskId === t.id;
+                    const isSavedMemThis = Boolean(savedMemoryTaskIds[t.id]);
 
-                  return (
-                    <div
-                      key={t.id}
-                      className="rounded-xl border border-slate-200/80 dark:border-studio-border bg-slate-50/70 dark:bg-studio-navy/80 p-3 space-y-2 text-xs"
-                    >
-                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                        <div>
-                          <div className="flex flex-wrap items-center gap-2 font-semibold">
-                            <span>
-                              #{stepOrder} • {t.title}
-                            </span>
-                            <Badge
-                              variant={
-                                t.status === "completed"
-                                  ? "emerald"
-                                  : t.status === "running"
-                                  ? "blue"
-                                  : t.status === "failed"
-                                  ? "rose"
-                                  : "amber"
-                              }
-                            >
-                              {t.status}
-                            </Badge>
-                            <span className="text-[11px] font-normal text-slate-400">
-                              {t.progress ?? 0}%
-                            </span>
-                          </div>
-                          <p className="mt-0.5 text-slate-600 dark:text-slate-400">
-                            {instructionText}
-                          </p>
-                        </div>
-
-                        <div className="flex items-center gap-2 shrink-0 flex-wrap">
-                          {t.status !== "completed" && (
-                            <button
-                              type="button"
-                              disabled={isRunningThis || runningChain}
-                              onClick={() => handleRunTask(t.id)}
-                              className="rounded-lg bg-purple-600/20 border border-purple-500/30 px-2.5 py-1 text-[11px] font-medium text-purple-300 hover:bg-purple-600/30 disabled:opacity-50"
-                            >
-                              {isRunningThis
-                                ? "Menjalankan..."
-                                : "Jalankan Agen"}
-                            </button>
-                          )}
-                          {t.status !== "running" &&
-                            t.status !== "completed" && (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleUpdateTaskStatus(t.id, "running")
+                    return (
+                      <div
+                        key={t.id}
+                        className="rounded-xl border border-slate-200/80 dark:border-studio-border bg-slate-50/70 dark:bg-studio-navy/80 p-3 space-y-2 text-xs"
+                      >
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                          <div>
+                            <div className="flex flex-wrap items-center gap-2 font-semibold">
+                              <span>
+                                #{stepOrder} • {t.title}
+                              </span>
+                              <Badge
+                                variant={
+                                  t.status === "completed"
+                                    ? "emerald"
+                                    : t.status === "running"
+                                    ? "blue"
+                                    : t.status === "failed"
+                                    ? "rose"
+                                    : "amber"
                                 }
-                                className="rounded-lg bg-blue-600/20 border border-blue-500/30 px-2.5 py-1 text-[11px] font-medium text-blue-400 hover:bg-blue-600/30"
                               >
-                                Mulai
-                              </button>
-                            )}
-                          {t.status !== "completed" && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                handleUpdateTaskStatus(t.id, "completed")
-                              }
-                              className="rounded-lg bg-emerald-600/20 border border-emerald-500/30 px-2.5 py-1 text-[11px] font-medium text-emerald-400 hover:bg-emerald-600/30"
-                            >
-                              Selesai
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            disabled={deletingTaskId === t.id}
-                            onClick={() => handleDeleteTask(t.id)}
-                            aria-label="Hapus tugas"
-                            className="rounded-lg bg-rose-600/20 border border-rose-500/30 p-1 text-rose-300 hover:bg-rose-600/30 disabled:opacity-50"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      </div>
-
-                      {t.status === "completed" &&
-                        Boolean(out.summary || out.contentMarkdown) && (
-                          <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-2.5 space-y-2">
-                            <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleCopyTaskOutput(t.id, t, out)
-                                }
-                                className="inline-flex items-center gap-1 rounded-md border border-slate-600/40 bg-slate-800/70 px-2 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-700/70"
-                              >
-                                {isCopiedThis ? (
-                                  <>
-                                    <Check className="h-3 w-3 text-emerald-400" />
-                                    <span>Tersalin</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <Copy className="h-3 w-3 text-blue-400" />
-                                    <span>Salin</span>
-                                  </>
-                                )}
-                              </button>
-
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleDownloadTaskOutput(t, out)
-                                }
-                                className="inline-flex items-center gap-1 rounded-md border border-slate-600/40 bg-slate-800/70 px-2 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-700/70"
-                              >
-                                <Download className="h-3 w-3 text-purple-400" />
-                                <span>Unduh .md</span>
-                              </button>
-
-                              <button
-                                type="button"
-                                disabled={isSavingMemThis || isSavedMemThis}
-                                onClick={() => handleSaveTaskToMemory(t, out)}
-                                className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-600/20 px-2 py-1 text-[11px] font-medium text-emerald-300 hover:bg-emerald-600/30 disabled:opacity-60"
-                              >
-                                <BookmarkPlus className="h-3 w-3" />
-                                <span>
-                                  {isSavedMemThis
-                                    ? "Tersimpan di Memori"
-                                    : isSavingMemThis
-                                    ? "Menyimpan..."
-                                    : "Simpan ke Memori"}
-                                </span>
-                              </button>
+                                {t.status}
+                              </Badge>
+                              <span className="text-[11px] font-normal text-slate-400">
+                                {t.progress ?? 0}%
+                              </span>
                             </div>
-
-                            {Boolean(out.summary) && (
-                              <p className="font-medium text-emerald-300">
-                                {String(out.summary)}
-                              </p>
-                            )}
-                            {Boolean(out.contentMarkdown) && (
-                              <p className="whitespace-pre-line text-slate-300 leading-relaxed">
-                                {String(out.contentMarkdown)}
-                              </p>
-                            )}
+                            <p className="mt-0.5 text-slate-600 dark:text-slate-400">
+                              {instructionText}
+                            </p>
                           </div>
-                        )}
-                    </div>
-                  );
-                })}
+
+                          <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                            {t.status !== "completed" && (
+                              <button
+                                type="button"
+                                disabled={isRunningThis || runningChain}
+                                onClick={() => handleRunTask(t.id)}
+                                className="rounded-lg bg-purple-600/20 border border-purple-500/30 px-2.5 py-1 text-[11px] font-medium text-purple-300 hover:bg-purple-600/30 disabled:opacity-50"
+                              >
+                                {isRunningThis
+                                  ? "Menjalankan..."
+                                  : "Jalankan Agen"}
+                              </button>
+                            )}
+                            {t.status !== "running" &&
+                              t.status !== "completed" && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleUpdateTaskStatus(t.id, "running")
+                                  }
+                                  className="rounded-lg bg-blue-600/20 border border-blue-500/30 px-2.5 py-1 text-[11px] font-medium text-blue-400 hover:bg-blue-600/30"
+                                >
+                                  Mulai
+                                </button>
+                              )}
+                            {t.status !== "completed" && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleUpdateTaskStatus(t.id, "completed")
+                                }
+                                className="rounded-lg bg-emerald-600/20 border border-emerald-500/30 px-2.5 py-1 text-[11px] font-medium text-emerald-400 hover:bg-emerald-600/30"
+                              >
+                                Selesai
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              disabled={deletingTaskId === t.id}
+                              onClick={() => handleDeleteTask(t.id)}
+                              aria-label="Hapus tugas"
+                              className="rounded-lg bg-rose-600/20 border border-rose-500/30 p-1 text-rose-300 hover:bg-rose-600/30 disabled:opacity-50"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {t.status === "completed" &&
+                          Boolean(out.summary || out.contentMarkdown) && (
+                            <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-2.5 space-y-2">
+                              <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleCopyTaskOutput(t.id, t, out)
+                                  }
+                                  className="inline-flex items-center gap-1 rounded-md border border-slate-600/40 bg-slate-800/70 px-2 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-700/70"
+                                >
+                                  {isCopiedThis ? (
+                                    <>
+                                      <Check className="h-3 w-3 text-emerald-400" />
+                                      <span>Tersalin</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Copy className="h-3 w-3 text-blue-400" />
+                                      <span>Salin</span>
+                                    </>
+                                  )}
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleDownloadTaskOutput(t, out)
+                                  }
+                                  className="inline-flex items-center gap-1 rounded-md border border-slate-600/40 bg-slate-800/70 px-2 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-700/70"
+                                >
+                                  <Download className="h-3 w-3 text-purple-400" />
+                                  <span>Unduh .md</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  disabled={isSavingMemThis || isSavedMemThis}
+                                  onClick={() =>
+                                    handleSaveTaskToMemory(t, out)
+                                  }
+                                  className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-600/20 px-2 py-1 text-[11px] font-medium text-emerald-300 hover:bg-emerald-600/30 disabled:opacity-60"
+                                >
+                                  <BookmarkPlus className="h-3 w-3" />
+                                  <span>
+                                    {isSavedMemThis
+                                      ? "Tersimpan di Memori"
+                                      : isSavingMemThis
+                                      ? "Menyimpan..."
+                                      : "Simpan ke Memori"}
+                                  </span>
+                                </button>
+                              </div>
+
+                              {Boolean(out.summary) && (
+                                <p className="font-medium text-emerald-300">
+                                  {String(out.summary)}
+                                </p>
+                              )}
+                              {Boolean(out.contentMarkdown) && (
+                                <p className="whitespace-pre-line text-slate-300 leading-relaxed">
+                                  {String(out.contentMarkdown)}
+                                </p>
+                              )}
+                            </div>
+                          )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
-          )}
+            )}
         </>
       )}
     </div>
