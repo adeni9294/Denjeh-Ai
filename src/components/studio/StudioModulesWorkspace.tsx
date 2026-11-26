@@ -106,8 +106,8 @@ const DEFAULT_DAILY_SLOTS: DailyScheduleSlot[] = [
     dateCode: "261126",
     timeLabel: "08.00",
     kind: "story",
-    title: "Posting Story Pagi — DNAverse Teaser",
-    caption: "DNA-Spiral aktif pagi ini. Siap hadapi Guardian?",
+    title: "Slot Pagi — Story Singkat",
+    caption: "Sapaan pagi & pemantik interaksi singkat hari ini.",
     mediaUrl: "",
     status: "pending",
   },
@@ -116,8 +116,8 @@ const DEFAULT_DAILY_SLOTS: DailyScheduleSlot[] = [
     dateCode: "261126",
     timeLabel: "11.00",
     kind: "photo",
-    title: "Posting Foto — Keyframe Karakter Aria",
-    caption: "Aria menemukan DNA-Spiral kuno di reruntuhan energi elemental.",
+    title: "Slot Siang — Konten Foto / Visual",
+    caption: "Visual tunggal dengan pesan utama yang jelas.",
     mediaUrl: "",
     status: "pending",
   },
@@ -126,8 +126,9 @@ const DEFAULT_DAILY_SLOTS: DailyScheduleSlot[] = [
     dateCode: "261126",
     timeLabel: "15.00",
     kind: "text",
-    title: "Posting Teks — Lore & Hook Sore",
-    caption: "Dalam 60 detik, satu energi DNA bisa mengubah segalanya.",
+    title: "Slot Sore — Postingan Teks / Edukasi",
+    caption: "Ringkasan insight, tips praktis, atau diskusi santai.",
+    mediaUrl: "",
     status: "pending",
   },
   {
@@ -135,14 +136,13 @@ const DEFAULT_DAILY_SLOTS: DailyScheduleSlot[] = [
     dateCode: "261126",
     timeLabel: "19.00",
     kind: "reels",
-    title: "Posting Reels — Cuplikan Aksi 60 Detik",
-    caption: "Guardian elemental terbangun. Tonton potongan aksinya sekarang.",
+    title: "Slot Malam — Video / Reels",
+    caption: "Cuplikan video pendek berdurasi singkat.",
     mediaUrl: "",
     status: "pending",
   },
 ];
 
-// Filter otomatis untuk menghapus accessToken, blok prepare_facebook_page_payload, dan pesan (#200)
 function sanitizeCaptionText(raw: string, fallbackTitle: string): string {
   const cleaned = raw
     .replace(/["']?accessToken["']?\s*:\s*["'][^"']*["']?,?/gi, "")
@@ -163,11 +163,29 @@ function inferTaskDivision(
   t: TaskWithPayloads
 ): Exclude<DivisionFilterKey, "all"> {
   const payload = (t.input_payload ?? {}) as Record<string, unknown>;
+  const out = (t.output_payload ?? {}) as Record<string, unknown>;
+
+  const explicitDiv = String(
+    out.division ?? payload.division ?? payload.contentType ?? ""
+  )
+    .toLowerCase()
+    .trim();
+
+  if (
+    explicitDiv === "reels" ||
+    explicitDiv === "video" ||
+    explicitDiv === "story" ||
+    explicitDiv === "photo" ||
+    explicitDiv === "text"
+  ) {
+    return explicitDiv === "video" ? "reels" : explicitDiv;
+  }
+
   const raw = `${t.title ?? ""} ${String(payload.agentCode ?? "")} ${String(
-    payload.contentType ?? ""
+    out.summary ?? ""
   )}`.toLowerCase();
 
-  if (raw.includes("reels") || raw.includes("video") || raw.includes("action")) {
+  if (raw.includes("reels") || raw.includes("video")) {
     return "reels";
   }
   if (raw.includes("story") || raw.includes("teaser")) {
@@ -176,9 +194,8 @@ function inferTaskDivision(
   if (
     raw.includes("foto") ||
     raw.includes("photo") ||
-    raw.includes("visual") ||
-    raw.includes("character") ||
-    raw.includes("gambar")
+    raw.includes("gambar") ||
+    raw.includes("visual")
   ) {
     return "photo";
   }
@@ -192,6 +209,7 @@ export function StudioModulesWorkspace({
 }) {
   const [projects, setProjects] = useState<DbProject[]>([]);
   const [selectedProject, setSelectedProject] = useState<string>("");
+  const [authReady, setAuthReady] = useState<boolean>(false);
   const [runs, setRuns] = useState<DbWorkflowRun[]>([]);
   const [tasks, setTasks] = useState<TaskWithPayloads[]>([]);
   const [usageLogs, setUsageLogs] = useState<UsageLogRow[]>([]);
@@ -366,6 +384,7 @@ export function StudioModulesWorkspace({
         data: { user },
       } = await supabase.auth.getUser();
       if (!user) {
+        setAuthReady(true);
         setLoading(false);
         return;
       }
@@ -379,17 +398,16 @@ export function StudioModulesWorkspace({
       setProjects(rows);
       if (rows.length > 0) {
         setSelectedProject((prev) => prev || rows[0].id);
-      } else {
-        setLoading(false);
       }
+      setAuthReady(true);
     })();
   }, []);
 
   useEffect(() => {
-    if (selectedProject) {
+    if (authReady) {
       loadData(selectedProject);
     }
-  }, [selectedProject, loadData]);
+  }, [authReady, selectedProject, loadData]);
 
   const handleCopyText = async (key: string, text: string) => {
     try {
@@ -586,13 +604,12 @@ export function StudioModulesWorkspace({
   const getPublishItemState = (t: TaskWithPayloads): PublishItemState => {
     if (publishItems[t.id]) return publishItems[t.id];
     const out = (t.output_payload ?? {}) as Record<string, unknown>;
-    const payload = (t.input_payload ?? {}) as Record<string, unknown>;
     const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
-    const agCode = String(payload.agentCode ?? "").toLowerCase();
+    const inferredDiv = inferTaskDivision(t);
     const fallbackType: "reels" | "photo" | "text" =
-      agCode === "video"
+      inferredDiv === "reels"
         ? "reels"
-        : agCode === "visual" || agCode === "character"
+        : inferredDiv === "photo" || inferredDiv === "story"
         ? "photo"
         : "text";
     const cpType =
@@ -745,7 +762,7 @@ export function StudioModulesWorkspace({
         [t.id]: {
           ok: true,
           message:
-            "Gambar berhasil dibuat & tersimpan ke Supabase Storage. Siap diposting ke Facebook.",
+            "Gambar berhasil dibuat & tersimpan ke Storage. Siap diposting ke Facebook.",
         },
       }));
     } catch (err) {
@@ -801,7 +818,7 @@ export function StudioModulesWorkspace({
         [t.id]: {
           ok: true,
           message: nextAuto
-            ? "Mode otomatis aktif: saat callback render masuk atau dijalankan, posting ke Facebook berjalan otomatis."
+            ? "Mode otomatis aktif: saat render selesai atau dijalankan, posting ke Facebook berjalan otomatis."
             : "Mode otomatis dimatikan untuk tugas ini.",
         },
       }));
@@ -854,7 +871,7 @@ export function StudioModulesWorkspace({
           [t.id]: {
             ok: true,
             message:
-              "Data render tersimpan (Render Selesai). Aktifkan Auto-Render→FB: ON atau klik Auto-Post Facebook untuk mempublikasikan.",
+              "Data render tersimpan (Render Selesai). Aktifkan Auto ON atau klik Posting ke FB untuk mempublikasikan.",
           },
         }));
         await loadData(selectedProject);
@@ -1033,15 +1050,12 @@ export function StudioModulesWorkspace({
             aria-label="Pilih Proyek Modul"
             className="rounded-xl border border-slate-200 dark:border-studio-border bg-slate-50 dark:bg-studio-navy px-3 py-1.5 text-xs font-medium"
           >
-            {projects.length === 0 ? (
-              <option value="">Belum ada proyek</option>
-            ) : (
-              projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))
-            )}
+            <option value="">Semua / Tanpa Proyek (Bebas)</option>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
           </select>
         </div>
 
@@ -1238,7 +1252,7 @@ export function StudioModulesWorkspace({
 
           {runs.length === 0 ? (
             <p className="text-xs text-slate-400">
-              Belum ada workflow run untuk proyek ini.
+              Belum ada workflow run untuk filter ini.
             </p>
           ) : (
             <div className="space-y-2.5">
@@ -1622,7 +1636,7 @@ export function StudioModulesWorkspace({
                             </button>
                             {publishedId && (
                               <span className="text-emerald-400">
-                                • FB ID: {publishedId}
+- FB ID: {publishedId}
                               </span>
                             )}
                           </div>
@@ -1829,7 +1843,7 @@ export function StudioModulesWorkspace({
                                   photoUrl: e.target.value,
                                 })
                               }
-                              placeholder="https://.../storage/v1/object/public/dnaverse-media/..."
+                              placeholder="https://.../storage/v1/object/public/..."
                               className="w-full rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-xs text-slate-200"
                             />
 
@@ -1858,7 +1872,7 @@ export function StudioModulesWorkspace({
                                   videoUrl: e.target.value,
                                 })
                               }
-                              placeholder="https://.../dnaverse-reels.mp4"
+                              placeholder="https://.../video-reels.mp4"
                               className="w-full rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-xs text-slate-200"
                             />
 
@@ -1951,7 +1965,7 @@ export function StudioModulesWorkspace({
             </h2>
             {usageLogs.length === 0 ? (
               <p className="text-xs text-slate-400">
-                Belum ada log penggunaan token untuk proyek ini.
+                Belum ada log penggunaan token untuk filter ini.
               </p>
             ) : (
               <div className="space-y-2">
