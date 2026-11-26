@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { generatePlanWithFallback } from "@/lib/ai/cloud-runner";
 import { DbAiModel, DbAiProvider, DbMemory, DbProject } from "@/types/studio";
 
 interface ChatTurn {
@@ -13,60 +14,43 @@ interface ChatRequestBody {
   messages?: ChatTurn[];
 }
 
-const CHAT_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
-
 const EASY_GOING_SYSTEM_PROMPT = `Kamu adalah asisten obrolan di aplikasi DENJEH AI untuk proyek kreatif seperti DNAverse — The Awakening.
 Gaya bicaramu santai, luwes, hangat, dan mengalir seperti teman ngobrol tanya-jawab di Gemini atau ChatGPT.
 Aturan utama:
 - Jawab langsung ke inti dengan bahasa Indonesia yang natural dan tidak kaku.
 - Jika pengguna sedang brainstorming, bertanya ringan, atau mendiskusikan ide/alur, balas secara dialogis dan tawarkan pertanyaan lanjutan atau sudut pandang baru yang relevan.
 - Jangan memaksa membuat rencana DAG, JSON, atau format agen yang kaku kecuali pengguna secara eksplisit meminta rencana langkah atau eksekusi tugas.
-- Tetap ringkas dan jelas, sesuaikan panjang jawaban dengan konteks obrolan.`;
+- Tetap ringkas dan jelas, sesuaikan panjang jawaban dengan konteks obrolan.
 
-function extractGeminiKeyFromProviders(
-  providers: DbAiProvider[],
-  models: DbAiModel[]
-): { apiKey: string; modelName: string } {
-  const activeModel = models.find((m) => {
-    const id = String(m.model_identifier ?? "").toLowerCase();
-    const prov = String(
-      (m as unknown as Record<string, unknown>).provider_key ?? ""
-    ).toLowerCase();
-    return id.includes("gemini") || prov.includes("gemini") || prov.includes("google");
-  });
+Kembalikan jawaban dalam format JSON valid dengan skema:
+{
+  "reply": "Balasan santai dan natural untuk pengguna"
+}`;
 
-  const preferredModel = activeModel?.model_identifier || CHAT_MODELS[0];
+function extractReplyFromResult(rawResult: unknown): {
+  reply: string;
+  modelUsed: string;
+  providerUsed: string;
+} {
+  const resObj = (rawResult ?? {}) as Record<string, unknown>;
+  const modelUsed = String(resObj.modelUsed ?? "gemini");
+  const providerUsed = String(resObj.providerUsed ?? "gemini");
 
-  for (const p of providers) {
-    const row = p as unknown as Record<string, unknown>;
-    const pKey = String(
-      row.provider_key ?? row.provider_name ?? row.name ?? ""
-    ).toLowerCase();
-    const candidateKey = String(
-      row.api_key ??
-        row.apiKey ??
-        row.encrypted_api_key ??
-        row.key_value ??
-        row.secret_key ??
-        ""
-    ).trim();
-
-    if (
-      candidateKey &&
-      (pKey.includes("gemini") ||
-        pKey.includes("google") ||
-        candidateKey.startsWith("AIza"))
-    ) {
-      return { apiKey: candidateKey, modelName: preferredModel };
-    }
+  if (typeof resObj.reply === "string" && resObj.reply.trim()) {
+    return { reply: resObj.reply.trim(), modelUsed, providerUsed };
+  }
+  if (typeof resObj.intentSummary === "string" && resObj.intentSummary.trim()) {
+    return { reply: resObj.intentSummary.trim(), modelUsed, providerUsed };
+  }
+  if (typeof resObj.rawText === "string" && resObj.rawText.trim()) {
+    return { reply: resObj.rawText.trim(), modelUsed, providerUsed };
   }
 
-  const envKey =
-    process.env.GEMINI_API_KEY?.trim() ||
-    process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim() ||
-    "";
-
-  return { apiKey: envKey, modelName: preferredModel };
+  return {
+    reply: "Siap, ada yang ingin kita obrolkan atau eksplorasi lebih lanjut?",
+    modelUsed,
+    providerUsed,
+  };
 }
 
 export async function POST(req: NextRequest) {
@@ -155,121 +139,54 @@ export async function POST(req: NextRequest) {
       supabase.from("ai_models").select("*").eq("is_active", true),
     ]);
 
-    const { apiKey, modelName } = extractGeminiKeyFromProviders(
-      (providers as DbAiProvider[]) ?? [],
-      (models as DbAiModel[]) ?? []
-    );
+    const conversationText = turns
+      .map((t) => `${t.role === "assistant" ? "Asisten" : "Pengguna"}: ${t.content.trim()}`)
+      .join("\n");
 
-    if (!apiKey) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error:
-            "API key Gemini tidak ditemukan pada konfigurasi ai_providers maupun environment server.",
-        },
-        { status: 500 }
-      );
-    }
+    const memoryText =
+      memories.length > 0
+        ? memories
+            .slice(0, 5)
+            .map((m) => `- ${m.memory_key}: ${m.content}`)
+            .join("\n")
+        : "- Tidak ada catatan memori tambahan.";
 
-    const contextNote = projectContext
-      ? `\nKonteks proyek aktif: ${projectContext.name}${
-          projectContext.description ? ` — ${projectContext.description}` : ""
-        }.${
-          memories.length > 0
-            ? `\nCatatan memori relevan:\n${memories
-                .slice(0, 5)
-                .map((m) => `- ${m.memory_key}: ${m.content}`)
-                .join("\n")}`
-            : ""
-        }`
-      : "";
+    const userPrompt = `PROYEK AKTIF: ${projectContext?.name ?? "Tanpa Proyek Khusus"}
+DESKRIPSI PROYEK: ${projectContext?.description ?? "-"}
 
-    const contents = turns.map((turn) => ({
-      role: turn.role === "assistant" ? "model" : "user",
-      parts: [{ text: turn.content.trim() }],
-    }));
+MEMORI TERKAIT:
+${memoryText}
 
-    const modelQueue = Array.from(
-      new Set([modelName, ...CHAT_MODELS].filter(Boolean))
-    );
+RIWAYAT OBROLAN:
+${conversationText}
 
-    let lastError = "";
-    for (const model of modelQueue) {
-      try {
-        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
-          apiKey
-        )}`;
+Balas pesan terakhir pengguna dengan santai dan mengalir.`;
 
-        const response = await fetch(endpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            systemInstruction: {
-              parts: [{ text: `${EASY_GOING_SYSTEM_PROMPT}${contextNote}` }],
-            },
-            contents,
-            generationConfig: {
-              temperature: 0.8,
-            },
-          }),
-        });
+    const result = await generatePlanWithFallback({
+      providers: (providers as DbAiProvider[]) ?? [],
+      models: (models as DbAiModel[]) ?? [],
+      systemPrompt: EASY_GOING_SYSTEM_PROMPT,
+      userPrompt,
+    });
 
-        const rawText = await response.text();
-        if (!response.ok) {
-          lastError = `${model} (${response.status}): ${rawText.slice(0, 240)}`;
-          continue;
-        }
+    const extracted = extractReplyFromResult(result);
 
-        let data: {
-          candidates?: Array<{
-            content?: {
-              parts?: Array<{ text?: string }>;
-            };
-          }>;
-        } = {};
-        try {
-          data = JSON.parse(rawText) as typeof data;
-        } catch {
-          lastError = `${model}: Respons Gemini bukan JSON valid.`;
-          continue;
-        }
-
-        const replyText = data.candidates?.[0]?.content?.parts
-          ?.map((part) => part.text ?? "")
-          .join("")
-          .trim();
-
-        if (!replyText) {
-          lastError = `${model}: Respons teks kosong.`;
-          continue;
-        }
-
-        return NextResponse.json({
-          ok: true,
-          reply: replyText,
-          modelUsed: model,
-          providerUsed: "gemini",
-        });
-      } catch (fetchErr) {
-        lastError =
-          fetchErr instanceof Error
-            ? `${model}: ${fetchErr.message}`
-            : `${model}: Gagal memanggil Gemini API.`;
-      }
-    }
-
+    return NextResponse.json({
+      ok: true,
+      reply: extracted.reply,
+      modelUsed: extracted.modelUsed,
+      providerUsed: extracted.providerUsed,
+    });
+  } catch (err) {
     return NextResponse.json(
       {
         ok: false,
-        error: `Gagal mendapatkan balasan obrolan: ${lastError || "Unknown error"}`,
+        error:
+          err instanceof Error
+            ? err.message
+            : "Terjadi kesalahan saat memproses obrolan.",
       },
-      { status: 502 }
+      { status: 500 }
     );
-  } catch (error) {
-    const message =
-      error instanceof Error
-        ? error.message
-        : "Terjadi kesalahan internal saat memproses obrolan.";
-    return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
 }
