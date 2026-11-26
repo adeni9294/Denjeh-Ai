@@ -55,6 +55,9 @@ type TaskWithPayloads = DbTask & {
 
 type WorkspaceMode = "chat" | "orchestrator";
 
+const DRAFT_INPUT_KEY = "denjeh_command_draft_input";
+const SELECTED_PROJECT_KEY = "denjeh_command_selected_project";
+
 function getPreferredModelForTask(task?: TaskWithPayloads): string | undefined {
   try {
     const rawPrefs = window.localStorage.getItem("denjeh_agent_model_prefs");
@@ -107,9 +110,23 @@ export function CommandWorkspace() {
   const [activeTab, setActiveTab] = useState<"command" | "history">("command");
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("chat");
   const [projects, setProjects] = useState<DbProject[]>([]);
-  const [selectedProject, setSelectedProject] = useState<string>("");
+  const [selectedProject, setSelectedProject] = useState<string>(() => {
+    if (typeof window === "undefined") return "";
+    try {
+      return window.localStorage.getItem(SELECTED_PROJECT_KEY) ?? "";
+    } catch {
+      return "";
+    }
+  });
   const [mode, setMode] = useState<"manual" | "autonomous">("manual");
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState<string>(() => {
+    if (typeof window === "undefined") return "";
+    try {
+      return window.localStorage.getItem(DRAFT_INPUT_KEY) ?? "";
+    } catch {
+      return "";
+    }
+  });
   const [attachments, setAttachments] = useState<AttachmentRef[]>([]);
   const [messages, setMessages] = useState<CommandMessage[]>([]);
   const [historyRuns, setHistoryRuns] = useState<DbWorkflowRun[]>([]);
@@ -130,6 +147,22 @@ export function CommandWorkspace() {
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isLoggedIn, setIsLoggedIn] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(DRAFT_INPUT_KEY, input);
+    } catch {
+      // Abaikan error localStorage
+    }
+  }, [input]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SELECTED_PROJECT_KEY, selectedProject);
+    } catch {
+      // Abaikan error localStorage
+    }
+  }, [selectedProject]);
 
   const loadHistoryAndTasks = useCallback(async (projectId: string) => {
     try {
@@ -204,9 +237,11 @@ export function CommandWorkspace() {
       const rows = (data as DbProject[]) ?? [];
       setProjects(rows);
 
-      if (rows.length > 0) {
-        setSelectedProject((prev) => prev || rows[0].id);
-      }
+      setSelectedProject((prev) => {
+        if (!prev) return "";
+        const exists = rows.some((p) => p.id === prev);
+        return exists ? prev : "";
+      });
     } catch {
       setIsLoggedIn(false);
     }
@@ -438,6 +473,7 @@ export function CommandWorkspace() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             projectId: selectedProject || null,
+            freeTopicMode: !selectedProject,
             title: msg.content.slice(0, 120),
             mode: "autonomous",
             steps: msg.plan,
@@ -494,7 +530,10 @@ export function CommandWorkspace() {
       const res = await fetch(`/api/orchestrator/tasks/${taskId}/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ preferredModel }),
+        body: JSON.stringify({
+          preferredModel,
+          freeTopicMode: !selectedProject,
+        }),
       });
       const rawText = await res.text();
       let data: { ok?: boolean; error?: string } = {};
@@ -568,7 +607,10 @@ export function CommandWorkspace() {
         const res = await fetch(`/api/orchestrator/tasks/${task.id}/run`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ preferredModel }),
+          body: JSON.stringify({
+            preferredModel,
+            freeTopicMode: !selectedProject,
+          }),
         });
         const rawText = await res.text();
         let resultData: { ok?: boolean; error?: string } = {};
@@ -668,7 +710,7 @@ export function CommandWorkspace() {
       const { error } = await supabase.from("memories").insert({
         user_id: user.id,
         project_id: t.project_id || selectedProject || null,
-        scope: "project",
+        scope: selectedProject ? "project" : "user",
         memory_key: `step_${stepOrder}_${agentCode}_${t.id.slice(0, 6)}`,
         content,
         importance: 7,
@@ -684,7 +726,7 @@ export function CommandWorkspace() {
       setErrorMsg(
         err instanceof Error
           ? err.message
-          : "Gagal menyimpan hasil agen ke memori proyek."
+          : "Gagal menyimpan hasil agen ke memori."
       );
     } finally {
       setSavingMemoryTaskId(null);
@@ -736,6 +778,11 @@ export function CommandWorkspace() {
     const nextMessages = [...messages, userMsg];
     setMessages(nextMessages);
     setInput("");
+    try {
+      window.localStorage.removeItem(DRAFT_INPUT_KEY);
+    } catch {
+      // Abaikan error localStorage
+    }
 
     try {
       if (workspaceMode === "chat") {
@@ -749,6 +796,7 @@ export function CommandWorkspace() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             projectId: selectedProject || undefined,
+            freeTopicMode: !selectedProject,
             message: trimmed,
             messages: chatHistory,
             attachments,
@@ -824,6 +872,7 @@ export function CommandWorkspace() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           projectId: selectedProject || undefined,
+          freeTopicMode: !selectedProject,
           instruction: trimmed,
           mode,
           attachments,
@@ -881,7 +930,7 @@ export function CommandWorkspace() {
         mode,
         requiresApproval: mode === "manual",
         approved: mode === "autonomous",
-        content: `${data.planResult.intentSummary} (Model: ${data.planResult.modelUsed} via ${data.planResult.providerUsed} • ${data.loadedMemoryCount ?? 0} memori proyek dimuat)`,
+        content: `${data.planResult.intentSummary} (Model: ${data.planResult.modelUsed} via ${data.planResult.providerUsed} • ${data.loadedMemoryCount ?? 0} memori dimuat)`,
         plan: data.planResult.steps,
       };
 
@@ -931,7 +980,7 @@ export function CommandWorkspace() {
     const completedItems = visibleTasks.filter((t) => t.status === "completed");
     if (completedItems.length === 0) return;
 
-    const projectName = activeProjectObj?.name || "Proyek DNAverse";
+    const projectName = activeProjectObj?.name || "Konten Bebas";
     const lines = completedItems.map((t) => {
       const payload = (t.input_payload ?? {}) as Record<string, unknown>;
       const out = (t.output_payload ?? {}) as Record<string, unknown>;
@@ -947,7 +996,7 @@ export function CommandWorkspace() {
       .replace(/[^a-z0-9-_]+/g, "-")
       .replace(/^-|-$/g, "");
     triggerMarkdownDownload(
-      `${slug || "dnaverse"}-paket-agen.md`,
+      `${slug || "denjeh-ai"}-paket-agen.md`,
       `# Paket Artefak Multi-Agen: ${projectName}\n\n${lines.join(
         "\n\n---\n\n"
       )}\n`
@@ -1045,7 +1094,7 @@ export function CommandWorkspace() {
 
           <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500 dark:text-slate-400">
             <SlidersHorizontal className="h-4 w-4 text-blue-500" />
-            <span>Proyek:</span>
+            <span>Konteks:</span>
           </div>
           <select
             value={selectedProject}
@@ -1054,18 +1103,15 @@ export function CommandWorkspace() {
               setMessages([]);
               setActiveRunId(null);
             }}
-            aria-label="Pilih Proyek"
+            aria-label="Pilih Konteks Proyek atau Mode Bebas"
             className="rounded-xl border border-slate-200 dark:border-studio-border bg-slate-50 dark:bg-studio-navy px-3 py-1.5 text-xs font-medium focus:border-blue-500 focus:outline-none"
           >
-            {projects.length === 0 ? (
-              <option value="">Belum ada proyek (Buat di /projects)</option>
-            ) : (
-              projects.map((proj) => (
-                <option key={proj.id} value={proj.id}>
-                  {proj.name}
-                </option>
-              ))
-            )}
+            <option value="">Bebas / Umum (Sesuai Perintah)</option>
+            {projects.map((proj) => (
+              <option key={proj.id} value={proj.id}>
+                {proj.name}
+              </option>
+            ))}
           </select>
         </div>
 
@@ -1125,7 +1171,7 @@ export function CommandWorkspace() {
             <div className="flex items-center gap-2">
               <History className="h-5 w-5 text-purple-400" />
               <h2 className="text-base font-semibold">
-                Riwayat Perintah Proyek ({historyRuns.length})
+                Riwayat Perintah ({historyRuns.length})
               </h2>
             </div>
             <button
@@ -1139,7 +1185,7 @@ export function CommandWorkspace() {
 
           {historyRuns.length === 0 ? (
             <p className="text-xs text-slate-400 py-6 text-center">
-              Belum ada riwayat perintah tersimpan untuk proyek ini.
+              Belum ada riwayat perintah tersimpan untuk filter ini.
             </p>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
@@ -1241,8 +1287,8 @@ export function CommandWorkspace() {
                 </h3>
                 <p className="text-xs leading-relaxed text-slate-500 dark:text-slate-400">
                   {workspaceMode === "chat"
-                    ? "Tanya apa saja, lempar ide adegan atau fitur, atau diskusi santai dua arah seperti di Gemini/ChatGPT. Kalau siap eksekusi berantai, tinggal pindah ke mode Orchestrator (DAG)."
-                    : "Riwayat perintah tersimpan rapi di tab History. Susun rencana DAG multi-agen untuk mengeksekusi tugas secara terstruktur."}
+                    ? "Tanya apa saja, lempar ide bebas atau topik acak, atau diskusi santai dua arah. Pilih 'Bebas / Umum' di atas agar tidak terkunci ke proyek tertentu."
+                    : "Berikan perintah bebas sesuai kebutuhan Anda. Orchestrator akan membagi tugas ke divisi Teks, Foto, Story, atau Reels."}
                 </p>
 
                 {workspaceMode === "chat" ? (
@@ -1251,12 +1297,12 @@ export function CommandWorkspace() {
                       type="button"
                       onClick={() =>
                         setInput(
-                          "Halo, lagi mikirin hook pembuka buat konten DNAverse — The Awakening. Menurutmu enaknya mulai dari mana?"
+                          "Kasih aku 3 ide hook konten motivasi dan tutorial singkat yang segar untuk Facebook Page hari ini."
                         )
                       }
                       className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-500/20"
                     >
-                      Brainstorming Hook Konten
+                      Ide Hook Teks & Tutorial
                     </button>
                     <button
                       type="button"
@@ -1275,12 +1321,12 @@ export function CommandWorkspace() {
                     type="button"
                     onClick={() =>
                       setInput(
-                        "Buat film pendek live-action fantasy action 60 detik untuk DNAverse. Kembangkan cerita, profil karakter, storyboard, arahan visual, prompt video yang dibagi menjadi klip 10-15 detik, caption media sosial, serta saran jadwal publikasi."
+                        "Buatkan konten untuk hari ini: teks motivasi/tutorial, foto visual bebas, story singkat, dan video reels film action berdurasi pendek."
                       )
                     }
                     className="rounded-xl border border-blue-500/30 bg-blue-500/10 px-3.5 py-2 text-xs font-medium text-blue-400 hover:bg-blue-500/20"
                   >
-                    Gunakan Contoh Perintah DNAverse 60 Detik
+                    Gunakan Contoh Perintah Konten Harian
                   </button>
                 )}
               </div>
@@ -1448,7 +1494,7 @@ export function CommandWorkspace() {
               placeholder={
                 workspaceMode === "chat"
                   ? "Ngobrol santai atau tanya apa saja... (Enter untuk kirim, Shift+Enter baris baru)"
-                  : "Tulis instruksi kreatif atau permintaan revisi lanjutan ke Master Orchestrator..."
+                  : "Tulis instruksi kreatif bebas atau permintaan revisi lanjutan ke Master Orchestrator..."
               }
               className="w-full resize-none rounded-xl border border-slate-200 dark:border-studio-border bg-slate-50 dark:bg-studio-navy px-3.5 py-2.5 text-sm focus:border-blue-500 focus:outline-none"
             />
