@@ -164,6 +164,14 @@ function inferTaskDivision(
 ): Exclude<DivisionFilterKey, "all"> {
   const payload = (t.input_payload ?? {}) as Record<string, unknown>;
   const out = (t.output_payload ?? {}) as Record<string, unknown>;
+  const code = String(payload.agentCode ?? t.agent_code ?? "")
+    .toLowerCase()
+    .trim();
+
+  if (code === "reels" || code === "video") return "reels";
+  if (code === "story") return "story";
+  if (code === "photo" || code === "visual") return "photo";
+  if (code === "text") return "text";
 
   const explicitDiv = String(
     out.division ?? payload.division ?? payload.contentType ?? ""
@@ -181,16 +189,9 @@ function inferTaskDivision(
     return explicitDiv === "video" ? "reels" : explicitDiv;
   }
 
-  const raw = `${t.title ?? ""} ${String(payload.agentCode ?? "")} ${String(
-    out.summary ?? ""
-  )}`.toLowerCase();
-
-  if (raw.includes("reels") || raw.includes("video")) {
-    return "reels";
-  }
-  if (raw.includes("story") || raw.includes("teaser")) {
-    return "story";
-  }
+  const raw = `${t.title ?? ""} ${String(out.summary ?? "")}`.toLowerCase();
+  if (raw.includes("reels") || raw.includes("video")) return "reels";
+  if (raw.includes("story") || raw.includes("teaser")) return "story";
   if (
     raw.includes("foto") ||
     raw.includes("photo") ||
@@ -200,6 +201,49 @@ function inferTaskDivision(
     return "photo";
   }
   return "text";
+}
+
+function isFinishedDeliverableTask(t: TaskWithPayloads): boolean {
+  if (t.status !== "completed") return false;
+
+  const payload = (t.input_payload ?? {}) as Record<string, unknown>;
+  const out = (t.output_payload ?? {}) as Record<string, unknown>;
+  const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
+  const code = String(payload.agentCode ?? t.agent_code ?? "")
+    .toLowerCase()
+    .trim();
+
+  // Langkah perantara/riset/audit bukan barang jadi publikasi
+  const intermediateCodes = new Set([
+    "idea",
+    "research",
+    "orchestrator",
+    "quality",
+  ]);
+  if (intermediateCodes.has(code)) {
+    return false;
+  }
+
+  const contentBody = String(
+    cp.caption || out.contentMarkdown || out.summary || ""
+  ).trim();
+
+  const hasMediaAsset = Boolean(
+    String(cp.photoUrl ?? "").trim() || String(cp.videoUrl ?? "").trim()
+  );
+
+  // Harus punya hasil output yang sudah terisi
+  if (!contentBody && !hasMediaAsset) {
+    return false;
+  }
+
+  // Cegah teks mentah yang hanya berupa daftar langkah/rencana tugas
+  const looksLikeRawTaskPlan =
+    /^\s*(1\.\s*\[[^\]]+\]|berikan daftar\s+\d+\s+konsep|mengumpulkan data,\s*referensi)/i.test(
+      contentBody
+    );
+
+  return !looksLikeRawTaskPlan || hasMediaAsset;
 }
 
 export function StudioModulesWorkspace({
@@ -1020,14 +1064,20 @@ export function StudioModulesWorkspace({
   };
 
   const completedTasks = tasks.filter((t) => t.status === "completed");
+  const finishedDeliverables = useMemo(
+    () => tasks.filter((t) => isFinishedDeliverableTask(t)),
+    [tasks]
+  );
 
   const filteredCompletedTasks = useMemo(() => {
     const base =
       divisionFilter === "all"
-        ? completedTasks
-        : completedTasks.filter((t) => inferTaskDivision(t) === divisionFilter);
+        ? finishedDeliverables
+        : finishedDeliverables.filter(
+            (t) => inferTaskDivision(t) === divisionFilter
+          );
     return showAllCompleted ? base : base.slice(0, 3);
-  }, [completedTasks, divisionFilter, showAllCompleted]);
+  }, [finishedDeliverables, divisionFilter, showAllCompleted]);
 
   const totalInputTokens = usageLogs.reduce(
     (acc, u) => acc + Number(u.input_tokens ?? 0),
@@ -1443,7 +1493,7 @@ export function StudioModulesWorkspace({
                   Koneksi Facebook Page Graph API & Otomatisasi App
                 </h2>
                 <p className="text-xs text-slate-400">
-                  Simpan kredensial halaman lalu rilis konten Teks, Foto,
+                  Simpan kredensial halaman lalu rilis barang jadi Teks, Foto,
                   Story, atau Reels ke Facebook Page.
                 </p>
               </div>
@@ -1526,19 +1576,19 @@ export function StudioModulesWorkspace({
                 <Send className="h-5 w-5 text-purple-400" />
                 <div>
                   <h2 className="text-base font-semibold">
-                    Publishing Center — Meja Kerja Divisi (
-                    {completedTasks.length} Selesai)
+                    Publishing Center — Barang Jadi Siap Rilis (
+                    {finishedDeliverables.length} Item)
                   </h2>
                   <p className="text-[11px] text-slate-400">
-                    Saring per divisi agar tampilan tetap tenang dan tidak
-                    menumpuk.
+                    Menampilkan hasil akhir konten yang siap diposting per
+                    divisi (langkah riset/ide mentah disembunyikan).
                   </p>
                 </div>
               </div>
 
               <div className="flex items-center gap-2 flex-wrap">
                 <Badge variant="purple">Teks • Foto • Story • Reels</Badge>
-                {completedTasks.length > 3 && (
+                {finishedDeliverables.length > 3 && (
                   <button
                     type="button"
                     onClick={() => setShowAllCompleted((prev) => !prev)}
@@ -1546,7 +1596,7 @@ export function StudioModulesWorkspace({
                   >
                     {showAllCompleted
                       ? "Ringkas (3 Item)"
-                      : `Lihat Semua (${completedTasks.length})`}
+                      : `Lihat Semua (${finishedDeliverables.length})`}
                   </button>
                 )}
               </div>
@@ -1579,8 +1629,9 @@ export function StudioModulesWorkspace({
 
             {filteredCompletedTasks.length === 0 ? (
               <p className="text-xs text-slate-400">
-                Belum ada tugas selesai untuk filter divisi ini. Jalankan agen
-                di AI Command Center untuk menyiapkan materi rilis.
+                Belum ada barang jadi untuk filter ini. Selesaikan tugas output
+                (Teks, Foto, Story, atau Reels) di AI Command Center terlebih
+                dahulu.
               </p>
             ) : (
               <div className="space-y-3">
@@ -1609,8 +1660,9 @@ export function StudioModulesWorkspace({
                             <span className="font-semibold text-sm truncate">
                               {t.title}
                             </span>
+                            <Badge variant="emerald">Barang Jadi</Badge>
                             {renderStatus === "completed" && (
-                              <Badge variant="emerald">Render Selesai</Badge>
+                              <Badge variant="blue">Render Selesai</Badge>
                             )}
                           </div>
                           <div className="flex items-center gap-2 flex-wrap text-[11px] text-slate-400">
@@ -1636,7 +1688,7 @@ export function StudioModulesWorkspace({
                             </button>
                             {publishedId && (
                               <span className="text-emerald-400">
-- FB ID: {publishedId}
+                                • FB ID: {publishedId}
                               </span>
                             )}
                           </div>
