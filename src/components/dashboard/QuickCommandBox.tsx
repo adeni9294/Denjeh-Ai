@@ -28,7 +28,8 @@ export function QuickCommandBox() {
           </h2>
         </div>
         <span className="text-[11px] text-slate-500 dark:text-slate-400">
-          Kirim instruksi kreatif untuk dipecah menjadi rencana eksekusi multi-agen
+          Kirim instruksi konten (Teks, Story, Foto, atau Reels) untuk diproses
+          multi-agen
         </span>
       </div>
 
@@ -37,7 +38,7 @@ export function QuickCommandBox() {
           type="text"
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          placeholder="Contoh: Buat konsep teaser 30 detik DNAverse lengkap dengan caption IG & YouTube..."
+          placeholder="Contoh: Buatkan konten foto dan teks postingan untuk Facebook Page hari ini..."
           className="flex-1 rounded-xl border border-slate-200 dark:border-studio-border bg-slate-50 dark:bg-studio-navy px-4 py-3 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none"
         />
         <button
