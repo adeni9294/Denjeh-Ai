@@ -2,6 +2,9 @@ export type AgentToolId =
   | "decompose_dag_plan"
   | "read_project_memories"
   | "save_project_memory"
+  | "draft_text_post"
+  | "craft_story_sequence"
+  | "design_photo_prompt"
   | "extract_story_beats"
   | "validate_character_continuity"
   | "build_visual_keyframes"
@@ -34,7 +37,7 @@ export const AGENT_TOOL_REGISTRY: Record<AgentToolId, AgentToolDefinition> = {
     name: "Decompose JSON DAG Plan",
     category: "orchestration",
     description:
-      "Memecah instruksi kreatif menjadi langkah berurutan lengkap dengan dependensi antar-agen dan durasi klip yang konsisten.",
+      "Memecah instruksi menjadi langkah berurutan sesuai jenis konten yang diminta (Teks, Story, Foto, atau Reels) lengkap dengan dependensi.",
     runtime: "prompt_structurer",
   },
   read_project_memories: {
@@ -42,7 +45,7 @@ export const AGENT_TOOL_REGISTRY: Record<AgentToolId, AgentToolDefinition> = {
     name: "Read Project Memories",
     category: "memory",
     description:
-      "Mengambil memori proyek & aturan kontinuitas dari tabel memories Supabase berdasarkan bobot.",
+      "Mengambil memori proyek & preferensi dari tabel memories berdasarkan bobot.",
     runtime: "internal_db",
   },
   save_project_memory: {
@@ -50,15 +53,39 @@ export const AGENT_TOOL_REGISTRY: Record<AgentToolId, AgentToolDefinition> = {
     name: "Save Project Memory",
     category: "memory",
     description:
-      "Menyimpan keputusan cerita, identitas karakter, atau aturan visual baru ke tabel memories.",
+      "Menyimpan keputusan gaya bahasa, konsep, atau aturan konten baru ke tabel memories.",
     runtime: "internal_db",
+  },
+  draft_text_post: {
+    id: "draft_text_post",
+    name: "Draft Text Post",
+    category: "creative",
+    description:
+      "Menyusun konten teks (hook kuat, isi utama, CTA/diskusi) tanpa memaksakan format skrip atau durasi video.",
+    runtime: "prompt_structurer",
+  },
+  craft_story_sequence: {
+    id: "craft_story_sequence",
+    name: "Craft Story Sequence",
+    category: "creative",
+    description:
+      "Menyusun konsep dan teks singkat padat untuk Story lengkap dengan elemen interaksi (polling, pertanyaan, ajakan balasan).",
+    runtime: "prompt_structurer",
+  },
+  design_photo_prompt: {
+    id: "design_photo_prompt",
+    name: "Design Photo Prompt",
+    category: "creative",
+    description:
+      "Merancang konsep gambar tunggal, sudut pandang, pencahayaan, dan prompt gambar statis siap pakai.",
+    runtime: "prompt_structurer",
   },
   extract_story_beats: {
     id: "extract_story_beats",
     name: "Extract 3-Act Story Beats",
     category: "creative",
     description:
-      "Menyusun struktur tiga babak dan pembagian adegan sesuai total durasi serta durasi per klip yang diminta.",
+      "Menyusun struktur alur untuk kebutuhan video/reels sesuai durasi yang diminta.",
     runtime: "prompt_structurer",
   },
   validate_character_continuity: {
@@ -66,7 +93,7 @@ export const AGENT_TOOL_REGISTRY: Record<AgentToolId, AgentToolDefinition> = {
     name: "Validate Character Continuity",
     category: "memory",
     description:
-      "Memverifikasi konsistensi wajah, kostum, properti kunci, dan ciri fisik karakter lintas klip.",
+      "Memverifikasi konsistensi identitas subjek, gaya visual, atau karakter lintas item bila diperlukan.",
     runtime: "prompt_structurer",
   },
   build_visual_keyframes: {
@@ -74,7 +101,7 @@ export const AGENT_TOOL_REGISTRY: Record<AgentToolId, AgentToolDefinition> = {
     name: "Build Visual Keyframes",
     category: "creative",
     description:
-      "Menghasilkan arahan pencahayaan sinematik, komposisi kamera, dan detail visual yang menyatu per klip.",
+      "Menyusun arahan pencahayaan, komposisi, dan detail visual yang konsisten.",
     runtime: "prompt_structurer",
   },
   split_clip_prompts_per_duration: {
@@ -82,7 +109,7 @@ export const AGENT_TOOL_REGISTRY: Record<AgentToolId, AgentToolDefinition> = {
     name: "Build Master Prompt Per Clip",
     category: "creative",
     description:
-      "Menyusun 1 master prompt utuh per klip sesuai durasi yang diminta (misal 10s tiap klip), menggabungkan cerita, lokasi, karakter, aksi per detik, kamera, dan dialog.",
+      "Khusus Reels/Video: menyusun 1 master prompt utuh per klip sesuai durasi yang diminta.",
     runtime: "prompt_structurer",
   },
   generate_social_caption_pack: {
@@ -90,7 +117,7 @@ export const AGENT_TOOL_REGISTRY: Record<AgentToolId, AgentToolDefinition> = {
     name: "Generate Social Caption Pack",
     category: "publishing",
     description:
-      "Menyusun hook pembuka, caption multi-platform, tagar, dan rekomendasi jadwal unggah.",
+      "Menyusun hook, caption, tagar, dan saran waktu unggah sesuai format (Teks, Story, Foto, atau Reels).",
     runtime: "prompt_structurer",
   },
   audit_continuity_checklist: {
@@ -98,7 +125,7 @@ export const AGENT_TOOL_REGISTRY: Record<AgentToolId, AgentToolDefinition> = {
     name: "Audit Continuity Checklist",
     category: "quality",
     description:
-      "Mengaudit hasil seluruh agen terhadap instruksi durasi klip, keutuhan master prompt per klip, dan memori proyek.",
+      "Memeriksa kesesuaian hasil dengan jenis konten yang diminta (Teks, Story, Foto, atau Reels) dan memori.",
     runtime: "prompt_structurer",
   },
   prepare_facebook_page_payload: {
@@ -106,7 +133,7 @@ export const AGENT_TOOL_REGISTRY: Record<AgentToolId, AgentToolDefinition> = {
     name: "Prepare Facebook Page Payload",
     category: "publishing",
     description:
-      "Memformat payload caption, metadata video, dan checklist siap kirim ke Meta Graph API.",
+      "Menyiapkan draf rilis teks, foto, story, atau reels siap kirim ke Facebook Page.",
     runtime: "external_api_ready",
   },
 };
@@ -116,7 +143,7 @@ export const MULTI_AGENT_SPECIALISTS: AgentSpecialistSpec[] = [
     code: "orchestrator",
     name: "Master Orchestrator",
     title: "Koordinator Utama & Perencana",
-    role: "Memecah instruksi, mengatur dependensi JSON DAG, menjaga kepatuhan durasi klip, dan memantau alur kerja lintas agen.",
+    role: "Memecah perintah ke agen yang relevan (Teks, Story, Foto, atau Reels) sesuai permintaan pengguna.",
     preferredTier: "Gemini / Groq",
     allowedTools: [
       "decompose_dag_plan",
@@ -124,113 +151,109 @@ export const MULTI_AGENT_SPECIALISTS: AgentSpecialistSpec[] = [
       "save_project_memory",
     ],
     defaultPrompt:
-      "Susun rencana produksi end-to-end 60 detik (misalnya 6 klip masing-masing 10s) untuk proyek aktif lengkap dengan dependensi antar-agen.",
+      "Susun rencana konten sesuai permintaan (teks, story, foto, atau reels) lengkap dengan pembagian tugas yang jelas.",
+  },
+  {
+    code: "text",
+    name: "Text Agent",
+    title: "Penulis Konten Teks & Postingan",
+    role: "Menyusun postingan teks, edukasi/tips, hook pembuka, dan narasi tulisan tanpa format video.",
+    preferredTier: "Gemini 2.5 Flash (Free)",
+    allowedTools: [
+      "read_project_memories",
+      "draft_text_post",
+      "generate_social_caption_pack",
+    ],
+    defaultPrompt:
+      "Tuliskan draf konten teks yang jelas, menarik, dan siap diposting dengan hook pembuka serta ajakan interaksi.",
+  },
+  {
+    code: "story",
+    name: "Story Agent",
+    title: "Kreator Story Singkat & Interaktif",
+    role: "Menyusun konsep dan teks singkat untuk Story lengkap dengan ide polling/pertanyaan audiens.",
+    preferredTier: "Gemini 2.5 Flash (Free)",
+    allowedTools: [
+      "read_project_memories",
+      "craft_story_sequence",
+      "save_project_memory",
+    ],
+    defaultPrompt:
+      "Buat rangkaian konsep Story singkat yang padat, menarik, dan dilengkapi elemen interaksi audiens.",
+  },
+  {
+    code: "photo",
+    name: "Photo Agent",
+    title: "Desainer Konsep & Prompt Foto",
+    role: "Menyusun konsep foto tunggal, komposisi, pencahayaan, dan prompt gambar statis.",
+    preferredTier: "Gemini 2.5 Flash (Free)",
+    allowedTools: [
+      "read_project_memories",
+      "design_photo_prompt",
+      "build_visual_keyframes",
+    ],
+    defaultPrompt:
+      "Buat konsep foto dan prompt gambar statis yang detail beserta komposisi dan pencahayaan yang sesuai.",
+  },
+  {
+    code: "reels",
+    name: "Reels Agent",
+    title: "Kreator Video Pendek & Reels",
+    role: "Khusus konten Reels/Video: menyusun hook cepat, alur adegan, dan master prompt per klip sesuai durasi.",
+    preferredTier: "Gemini 2.5 Flash (Free)",
+    allowedTools: [
+      "read_project_memories",
+      "extract_story_beats",
+      "split_clip_prompts_per_duration",
+    ],
+    defaultPrompt:
+      "Susun konsep Reels/video pendek lengkap dengan hook pembuka dan prompt per klip sesuai durasi yang diminta.",
   },
   {
     code: "idea",
     name: "Idea Agent",
     title: "Konseptor Kreatif",
-    role: "Mengembangkan premis cerita, sudut pandang unik, dan konsep kampanye.",
+    role: "Mengembangkan ide dan sudut pandang konten untuk berbagai format (teks, story, foto, atau reels).",
     preferredTier: "Gemini 2.5 Flash (Free)",
     allowedTools: ["read_project_memories", "save_project_memory"],
     defaultPrompt:
-      "Kembangkan 3 variasi premis dan hook pembuka beberapa detik pertama untuk proyek aktif.",
+      "Kembangkan 3 variasi ide konten yang relevan dan segar sesuai topik yang diminta.",
   },
   {
     code: "research",
     name: "Research Agent",
     title: "Riset & Referensi",
-    role: "Mengumpulkan referensi dunia, tren audiens, dan akurasi latar belakang.",
+    role: "Mengumpulkan referensi topik, sudut pandang audiens, dan poin fakta pendukung.",
     preferredTier: "Llama 3.3 70B (Groq)",
     allowedTools: ["read_project_memories", "save_project_memory"],
     defaultPrompt:
-      "Susun referensi atmosfer visual, gaya sinematografi, dan tren format pendek untuk proyek aktif.",
-  },
-  {
-    code: "story",
-    name: "Story Agent",
-    title: "Penulis Naskah & Narasi",
-    role: "Menyusun struktur tiga babak, dialog singkat, dan pembagian adegan sesuai durasi klip yang diminta.",
-    preferredTier: "Gemini 2.5 Flash (Free)",
-    allowedTools: [
-      "read_project_memories",
-      "extract_story_beats",
-      "save_project_memory",
-    ],
-    defaultPrompt:
-      "Susun sinopsis, struktur tiga babak, dan naskah dialog singkat yang selaras dengan durasi klip yang diminta pada instruksi.",
-  },
-  {
-    code: "character",
-    name: "Character Agent",
-    title: "Desain & Kontinuitas Karakter",
-    role: "Menjaga konsistensi profil karakter, kostum, dan ciri visual lintas klip.",
-    preferredTier: "Gemini 2.5 Flash (Free)",
-    allowedTools: [
-      "read_project_memories",
-      "validate_character_continuity",
-      "save_project_memory",
-    ],
-    defaultPrompt:
-      "Buat profil karakter lengkap dengan detail wajah, kostum, properti kunci, dan aturan kontinuitas visual.",
-  },
-  {
-    code: "visual",
-    name: "Visual Agent",
-    title: "Pengarah Visual & Prompt Gambar",
-    role: "Merancang komposisi sinematik, pencahayaan, dan arahan visual terpadu per adegan.",
-    preferredTier: "Gemini 2.5 Flash (Free)",
-    allowedTools: [
-      "read_project_memories",
-      "validate_character_continuity",
-      "build_visual_keyframes",
-    ],
-    defaultPrompt:
-      "Susun arahan pencahayaan sinematik, komposisi kamera, dan elemen visual terpadu untuk tiap adegan.",
-  },
-  {
-    code: "video",
-    name: "Video Agent",
-    title: "Master Prompt Klip & Storyboard",
-    role: "Menyusun 1 master prompt utuh per klip sesuai durasi yang diminta, menyatukan cerita, lokasi, karakter, aksi per detik, kamera, dan dialog.",
-    preferredTier: "Gemini 2.5 Flash (Free)",
-    allowedTools: [
-      "read_project_memories",
-      "build_visual_keyframes",
-      "split_clip_prompts_per_duration",
-    ],
-    defaultPrompt:
-      "Buat 1 master prompt utuh untuk setiap klip sesuai durasi yang diminta (misal 10s per klip), lengkap dengan cerita, lokasi, karakter, rincian aksi per detik, gerakan kamera, dan dialog.",
+      "Ringkas poin riset, sudut pandang utama, dan referensi pendukung untuk topik yang diminta.",
   },
   {
     code: "marketing",
     name: "Marketing Agent",
     title: "Strategi Distribusi & Copywriting",
-    role: "Menulis caption, tagar, hook pembuka, dan jadwal publikasi optimal.",
+    role: "Menyusun caption, tagar, CTA, dan saran waktu rilis sesuai jenis konten.",
     preferredTier: "Llama 3.3 70B (Groq)",
     allowedTools: ["read_project_memories", "generate_social_caption_pack"],
     defaultPrompt:
-      "Tulis caption media sosial, hook pembuka, tagar relevan, dan jadwal rilis optimal untuk proyek aktif.",
+      "Siapkan caption, tagar, dan saran waktu rilis yang sesuai untuk jenis konten yang dibuat.",
   },
   {
     code: "quality",
     name: "Quality Agent",
-    title: "Audit Kualitas & Kontinuitas",
-    role: "Mengevaluasi output terhadap kepatuhan durasi klip, keutuhan master prompt, dan memori proyek sebelum disetujui.",
+    title: "Audit Kualitas & Kesesuaian Format",
+    role: "Memeriksa apakah hasil sudah sesuai dengan format yang diminta (teks, story, foto, atau reels).",
     preferredTier: "Gemini 2.5 Flash (Free)",
-    allowedTools: [
-      "read_project_memories",
-      "validate_character_continuity",
-      "audit_continuity_checklist",
-    ],
+    allowedTools: ["read_project_memories", "audit_continuity_checklist"],
     defaultPrompt:
-      "Audit kesesuaian durasi setiap klip dengan instruksi, kelengkapan 1 master prompt utuh per klip, serta kontinuitas karakter dan kostum.",
+      "Audit hasil konten agar sesuai dengan format yang diminta, jelas, dan siap dipublikasikan.",
   },
   {
     code: "publishing",
     name: "Publishing Agent",
-    title: "Kesiapan Publikasi Resmi",
-    role: "Memformat paket konten untuk Facebook Pages, Instagram Pro, & YouTube.",
+    title: "Kesiapan Publikasi",
+    role: "Menyiapkan draf konten Teks, Story, Foto, atau Reels agar siap dipublikasikan ke kanal tujuan.",
     preferredTier: "Rule Engine + API",
     allowedTools: [
       "read_project_memories",
@@ -238,14 +261,15 @@ export const MULTI_AGENT_SPECIALISTS: AgentSpecialistSpec[] = [
       "prepare_facebook_page_payload",
     ],
     defaultPrompt:
-      "Siapkan paket final publikasi lengkap dengan metadata, caption Facebook Page, dan checklist rilis.",
+      "Rapikan paket konten siap rilis sesuai jenis medianya (teks, story, foto, atau reels).",
   },
 ];
 
 export function getAgentSpec(agentCode: string): AgentSpecialistSpec {
   const normalized = agentCode.toLowerCase().trim();
+  const mappedCode = normalized === "video" ? "reels" : normalized;
   return (
-    MULTI_AGENT_SPECIALISTS.find((a) => a.code === normalized) ??
+    MULTI_AGENT_SPECIALISTS.find((a) => a.code === mappedCode) ??
     MULTI_AGENT_SPECIALISTS[0]
   );
 }
@@ -259,11 +283,16 @@ export function buildAgentToolInstructionBlock(agentCode: string): string {
     })
     .join("\n");
 
+  const isReelsOrVideo = spec.code === "reels";
+  const executionRule = isReelsOrVideo
+    ? "INSTRUKSI EKSEKUSI (REELS/VIDEO): Patuhi durasi klip yang diminta pengguna secara konsisten dan susun prompt klip/adegan yang jelas."
+    : "INSTRUKSI EKSEKUSI: Sesuaikan format keluaran dengan peran agen dan permintaan pengguna (teks, story, atau foto). Jangan memaksakan format skrip video berdurasi detik bila tidak diminta.";
+
   return [
     `PERAN SPESIALIS: ${spec.name} (${spec.title})`,
     `TANGGUNG JAWAB: ${spec.role}`,
     `IZIN TOOLS AKTIF:`,
     toolsList,
-    `INSTRUKSI EKSEKUSI: Patuhi durasi per klip yang diminta pengguna secara konsisten pada setiap klip (jangan mengubah atau mencampur durasi berbeda kecuali diminta). Untuk setiap klip, satukan cerita/adegan, lokasi, karakter/kostum, aksi per detik, kamera/pencahayaan, dan dialog ke dalam 1 master prompt utuh.`,
+    executionRule,
   ].join("\n");
 }
