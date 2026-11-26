@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 
 interface ChatTurn {
   role: "user" | "assistant";
@@ -20,6 +21,73 @@ Aturan utama:
 - Jika pengguna sedang brainstorming, bertanya ringan, atau mendiskusikan ide/alur, balas secara dialogis dan tawarkan pertanyaan lanjutan atau sudut pandang baru yang relevan.
 - Jangan memaksa membuat rencana DAG, JSON, atau format agen yang kaku kecuali pengguna secara eksplisit meminta rencana langkah atau eksekusi tugas.
 - Tetap ringkas dan jelas, sesuaikan panjang jawaban dengan konteks obrolan.`;
+
+async function resolveGeminiApiKey(): Promise<string> {
+  const fromProcess =
+    process.env.GEMINI_API_KEY?.trim() ||
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim() ||
+    process.env.NEXT_PUBLIC_GEMINI_API_KEY?.trim();
+
+  if (fromProcess) return fromProcess;
+
+  const globalObj = globalThis as Record<string, unknown>;
+  for (const keyName of [
+    "GEMINI_API_KEY",
+    "GOOGLE_GENERATIVE_AI_API_KEY",
+  ]) {
+    const val = globalObj[keyName];
+    if (typeof val === "string" && val.trim()) {
+      return val.trim();
+    }
+  }
+
+  try {
+    const supabaseUrl =
+      process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() ||
+      (typeof globalObj.NEXT_PUBLIC_SUPABASE_URL === "string"
+        ? globalObj.NEXT_PUBLIC_SUPABASE_URL.trim()
+        : "");
+    const supabaseKey =
+      process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim() ||
+      "";
+
+    if (supabaseUrl && supabaseKey) {
+      const sb = createClient(supabaseUrl, supabaseKey, {
+        auth: { persistSession: false },
+      });
+
+      const { data: providers } = await sb
+        .from("ai_providers")
+        .select("*")
+        .eq("is_active", true);
+
+      if (Array.isArray(providers)) {
+        for (const row of providers as Array<Record<string, unknown>>) {
+          const pKey = String(
+            row.provider_key ?? row.provider_name ?? row.name ?? ""
+          ).toLowerCase();
+          const apiKey = String(
+            row.api_key ?? row.encrypted_api_key ?? row.key_value ?? ""
+          ).trim();
+
+          if (
+            apiKey &&
+            (pKey.includes("gemini") ||
+              pKey.includes("google") ||
+              apiKey.startsWith("AIza"))
+          ) {
+            return apiKey;
+          }
+        }
+      }
+    }
+  } catch {
+    // Abaikan jika gagal membaca key dari Supabase
+  }
+
+  return "";
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -59,13 +127,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const geminiApiKey = process.env.GEMINI_API_KEY?.trim();
+    const geminiApiKey = await resolveGeminiApiKey();
     if (!geminiApiKey) {
       return NextResponse.json(
         {
           ok: false,
           error:
-            "GEMINI_API_KEY belum terbaca di environment Cloudflare Worker / server.",
+            "API key Gemini belum terbaca di environment Worker maupun tabel ai_providers.",
         },
         { status: 500 }
       );
