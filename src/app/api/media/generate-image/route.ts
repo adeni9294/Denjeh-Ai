@@ -56,7 +56,7 @@ async function generateImageBase64WithGemini(
   const errors: string[] = [];
 
   // 1. Coba model Gemini native image generation via generateContent
-  const geminiImageModels = ["gemini-2.5-flash-image"];
+  const geminiImageModels = ["gemini-3.8-flash-image"];
   for (const model of geminiImageModels) {
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
