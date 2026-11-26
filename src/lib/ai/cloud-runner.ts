@@ -1,5 +1,8 @@
 import { DbAiModel, DbAiProvider } from "@/types/studio";
-import { buildAgentToolInstructionBlock } from "@/lib/ai/agent-tools";
+import {
+  buildAgentToolInstructionBlock,
+  getAgentSpec,
+} from "@/lib/ai/agent-tools";
 
 export interface GeneratedPlanStep {
   stepNumber: number;
@@ -19,6 +22,14 @@ export interface OrchestratorPlanResult {
   inputTokens: number;
   outputTokens: number;
 }
+
+const DEPRECATED_MODELS = new Set([
+  "gemini-2.0-flash",
+  "models/gemini-2.0-flash",
+  "gemini-2.0-flash-001",
+  "gemini-1.5-flash",
+  "gemini-1.5-pro",
+]);
 
 function decodeStoredKey(encoded: string | null): string | null {
   if (!encoded) return null;
@@ -205,6 +216,7 @@ export async function generatePlanWithFallback(params: {
     );
   }
 
+  const fallbackSpec = getAgentSpec(params.agentCode || "text");
   const errors: string[] = [];
 
   for (const provider of enabledProviders) {
@@ -212,16 +224,30 @@ export async function generatePlanWithFallback(params: {
     if (!apiKey) continue;
 
     const providerModels = params.models
-      .filter((m) => m.provider_id === provider.id && m.is_active)
+      .filter(
+        (m) =>
+          m.provider_id === provider.id &&
+          m.is_active &&
+          !DEPRECATED_MODELS.has(String(m.model_identifier ?? "").toLowerCase().trim())
+      )
       .sort((a, b) => Number(b.is_default) - Number(a.is_default));
 
     const baseCandidates =
       providerModels.length > 0
-        ? Array.from(new Set(providerModels.map((m) => m.model_identifier)))
+        ? Array.from(
+            new Set(
+              providerModels.map((m) =>
+                String(m.model_identifier).replace(/^models\//, "").trim()
+              )
+            )
+          )
         : [
             provider.provider_key === "groq"
               ? "llama-3.3-70b-versatile"
-              : "gemini-2.5-flash",
+              : "gemini-3.8-flash",
+            ...(provider.provider_key === "groq"
+              ? ["llama-3.1-8b-instant"]
+              : ["gemini-3.5-flash-lite", "gemini-2.5-flash"]),
           ];
 
     const candidateModels =
@@ -267,10 +293,16 @@ export async function generatePlanWithFallback(params: {
         const normalizedSteps: GeneratedPlanStep[] = rawSteps.map(
           (item, index) => {
             const row = item as Record<string, unknown>;
+            const rawCode = String(row.agentCode ?? fallbackSpec.code ?? "text")
+              .toLowerCase()
+              .trim();
+            const mappedCode = rawCode === "video" ? "reels" : rawCode;
+            const stepSpec = getAgentSpec(mappedCode);
+
             return {
               stepNumber: Number(row.stepNumber ?? index + 1),
-              agentCode: String(row.agentCode ?? "story"),
-              agentName: String(row.agentName ?? "Story Agent"),
+              agentCode: mappedCode,
+              agentName: String(row.agentName ?? stepSpec.name),
               action: String(
                 row.action ?? "Menyusun bagian konten sesuai instruksi."
               ),
