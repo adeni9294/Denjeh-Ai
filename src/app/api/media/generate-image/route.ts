@@ -188,9 +188,6 @@ async function generateImageBufferWithWorkersAi(
   const model = "@cf/black-forest-labs/flux-1-schnell";
   const output = await aiBinding.run(model, {
     prompt: englishPrompt,
-    width: 1280,
-    height: 720,
-    num_steps: 4,
   });
 
   const buffer = extractImageBufferFromWorkersAi(output);
