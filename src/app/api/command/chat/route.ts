@@ -15,12 +15,23 @@ interface ChatRequestBody {
 }
 
 const DEFAULT_GEMINI_CHAT_MODELS = [
+  "gemini-3.8-flash",
+  "gemini-3.6-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
   "gemini-2.5-flash",
   "gemini-2.5-flash-lite",
-  "gemini-2.0-flash",
 ];
 
-const EASY_GOING_SYSTEM_PROMPT = `Kamu adalah asisten obrolan di aplikasi DENJEH AI untuk proyek kreatif seperti DNAverse — The Awakening.
+const DEPRECATED_GEMINI_MODELS = new Set([
+  "gemini-2.0-flash",
+  "models/gemini-2.0-flash",
+  "gemini-2.0-flash-001",
+  "gemini-1.5-flash",
+  "gemini-1.5-pro",
+]);
+
+const EASY_GOING_SYSTEM_PROMPT = `Kamu adalah asisten obrolan di aplikasi DENJEH AI untuk proyek kreatif.
 Gaya bicaramu santai, luwes, hangat, dan mengalir seperti teman ngobrol tanya-jawab di Gemini atau ChatGPT.
 Aturan utama:
 - Jawab langsung ke inti dengan bahasa Indonesia yang natural dan tidak kaku.
@@ -66,8 +77,11 @@ async function resolveGeminiChatConfig(
     const providerModels = models
       .filter((m) => m.provider_id === provider.id && m.is_active)
       .sort((a, b) => Number(b.is_default) - Number(a.is_default))
-      .map((m) => m.model_identifier?.trim())
-      .filter((m): m is string => Boolean(m));
+      .map((m) => m.model_identifier?.replace(/^models\//, "").trim())
+      .filter(
+        (m): m is string =>
+          Boolean(m) && !DEPRECATED_GEMINI_MODELS.has(m.toLowerCase())
+      );
 
     const candidateModels = Array.from(
       new Set([...providerModels, ...DEFAULT_GEMINI_CHAT_MODELS])
