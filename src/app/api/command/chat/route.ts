@@ -28,10 +28,10 @@ Aturan utama:
 - Jangan memaksa membuat rencana DAG, JSON, atau format agen yang kaku kecuali pengguna secara eksplisit meminta rencana langkah atau eksekusi tugas.
 - Tetap ringkas dan jelas, sesuaikan panjang jawaban dengan konteks obrolan.`;
 
-function findGeminiApiKey(
+async function findGeminiApiKey(
   providers: DbAiProvider[],
   models: DbAiModel[]
-): { apiKey: string; preferredModel: string } {
+): Promise<{ apiKey: string; preferredModel: string }> {
   const modelFromDb = models.find((m) =>
     String(m.model_identifier ?? "")
       .toLowerCase()
@@ -89,7 +89,8 @@ function findGeminiApiKey(
     }
   }
 
-const envKey = await getGeminiKey();
+  // Kalo gak ketemu di DB, baru ambil dari Environment / Secret Cloudflare
+  const envKey = await getGeminiKey();
 
   return { apiKey: envKey, preferredModel };
 }
@@ -180,7 +181,7 @@ export async function POST(req: NextRequest) {
       supabase.from("ai_models").select("*").eq("is_active", true),
     ]);
 
-    const { apiKey, preferredModel } = findGeminiApiKey(
+    const { apiKey, preferredModel } = await findGeminiApiKey(
       (providers as DbAiProvider[]) ?? [],
       (models as DbAiModel[]) ?? []
     );
