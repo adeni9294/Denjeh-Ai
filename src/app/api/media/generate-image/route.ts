@@ -53,14 +53,10 @@ async function generateImageBase64WithGemini(
   apiKey: string,
   prompt: string
 ): Promise<{ base64: string; mimeType: string }> {
-  // Coba endpoint generateContent dengan model Gemini image generation
-  const geminiImageModels = [
-    "gemini-2.5-flash-image",
-    "gemini-2.0-flash-exp-image-generation",
-  ];
+  const errors: string[] = [];
 
-  let lastErr = "";
-
+  // 1. Coba model Gemini native image generation via generateContent
+  const geminiImageModels = ["gemini-2.5-flash-image"];
   for (const model of geminiImageModels) {
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
@@ -85,7 +81,7 @@ async function generateImageBase64WithGemini(
 
       const rawText = await res.text();
       if (!res.ok) {
-        lastErr = `${model} (${res.status}): ${rawText.slice(0, 200)}`;
+        errors.push(`${model} (${res.status}): ${rawText.slice(0, 180)}`);
         continue;
       }
 
@@ -110,16 +106,70 @@ async function generateImageBase64WithGemini(
         };
       }
 
-      lastErr = `${model}: Tidak ada data gambar pada respons.`;
+      errors.push(`${model}: Tidak ada inlineData pada respons.`);
     } catch (err) {
-      lastErr =
+      errors.push(
         err instanceof Error
           ? `${model}: ${err.message}`
-          : `${model}: Gagal memanggil Gemini Image API.`;
+          : `${model}: Gagal memanggil Gemini Image API.`
+      );
     }
   }
 
-  throw new Error(`Gagal generate gambar: ${lastErr || "Unknown error"}`);
+  // 2. Fallback ke Imagen REST endpoint (:predict)
+  const imagenModels = ["imagen-3.0-generate-002", "imagen-4.0-generate-001"];
+  for (const model of imagenModels) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:predict?key=${encodeURIComponent(
+        apiKey
+      )}`;
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instances: [{ prompt }],
+          parameters: {
+            sampleCount: 1,
+            aspectRatio: "16:9",
+          },
+        }),
+      });
+
+      const rawText = await res.text();
+      if (!res.ok) {
+        errors.push(`${model} (${res.status}): ${rawText.slice(0, 180)}`);
+        continue;
+      }
+
+      const parsed = JSON.parse(rawText) as {
+        predictions?: Array<{
+          bytesBase64Encoded?: string;
+          mimeType?: string;
+        }>;
+      };
+
+      const pred = parsed.predictions?.[0];
+      if (pred?.bytesBase64Encoded) {
+        return {
+          base64: pred.bytesBase64Encoded,
+          mimeType: pred.mimeType || "image/png",
+        };
+      }
+
+      errors.push(`${model}: Tidak ada bytesBase64Encoded pada respons.`);
+    } catch (err) {
+      errors.push(
+        err instanceof Error
+          ? `${model}: ${err.message}`
+          : `${model}: Gagal memanggil Imagen API.`
+      );
+    }
+  }
+
+  throw new Error(
+    `Gagal generate gambar: ${errors.join(" | ") || "Unknown error"}`
+  );
 }
 
 export async function POST(req: NextRequest) {
@@ -172,8 +222,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           ok: false,
-          error:
-            "API key Gemini tidak ditemukan untuk membuat gambar.",
+          error: "API key Gemini tidak ditemukan untuk membuat gambar.",
         },
         { status: 500 }
       );
@@ -185,7 +234,8 @@ export async function POST(req: NextRequest) {
     );
 
     const bytes = Buffer.from(base64, "base64");
-    const ext = mimeType.includes("jpeg") || mimeType.includes("jpg") ? "jpg" : "png";
+    const ext =
+      mimeType.includes("jpeg") || mimeType.includes("jpg") ? "jpg" : "png";
     const safePrefix = (body.filePrefix || "dnaverse")
       .toLowerCase()
       .replace(/[^a-z0-9-_]+/g, "-");
@@ -220,7 +270,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           ok: false,
-          error: `Gambar berhasil dibuat tetapi gagal diunggah ke Supabase Storage (${lastStorageError || "pastikan bucket 'media' sudah dibuat dan public"}).`,
+          error: `Gambar berhasil dibuat tetapi gagal diunggah ke Supabase Storage (${
+            lastStorageError ||
+            "pastikan bucket 'media' sudah dibuat dan public"
+          }).`,
         },
         { status: 500 }
       );
