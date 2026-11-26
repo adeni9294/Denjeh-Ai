@@ -365,7 +365,12 @@ export async function POST(req: NextRequest) {
       .replace(/[^a-z0-9-_]+/g, "-");
     const filePath = `${user.id}/${safePrefix}-${Date.now()}.${ext}`;
 
-    const bucketsToTry = ["media", "generated-images", "public-media"];
+    const bucketsToTry = [
+      "dnaverse-media",
+      "media",
+      "generated-images",
+      "public-media",
+    ];
     let uploadedPublicUrl = "";
     let lastStorageError = "";
 
@@ -385,7 +390,7 @@ export async function POST(req: NextRequest) {
           uploadedPublicUrl = pubData.publicUrl;
           break;
         }
-      } else {
+      } else if (!lastStorageError) {
         lastStorageError = `${bucket}: ${uploadErr.message}`;
       }
     }
@@ -396,7 +401,7 @@ export async function POST(req: NextRequest) {
           ok: false,
           error: `Gambar berhasil dibuat tetapi gagal diunggah ke Supabase Storage (${
             lastStorageError ||
-            "pastikan bucket 'media' sudah dibuat dan public"
+            "pastikan bucket 'dnaverse-media' sudah dibuat dan public"
           }).`,
         },
         { status: 500 }
