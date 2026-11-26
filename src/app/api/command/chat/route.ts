@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { DbAiModel, DbAiProvider, DbMemory, DbProject } from "@/types/studio";
 
 interface ChatTurn {
   role: "user" | "assistant";
@@ -22,75 +23,73 @@ Aturan utama:
 - Jangan memaksa membuat rencana DAG, JSON, atau format agen yang kaku kecuali pengguna secara eksplisit meminta rencana langkah atau eksekusi tugas.
 - Tetap ringkas dan jelas, sesuaikan panjang jawaban dengan konteks obrolan.`;
 
-async function resolveGeminiApiKey(): Promise<string> {
-  const fromProcess =
+function extractGeminiKeyFromProviders(
+  providers: DbAiProvider[],
+  models: DbAiModel[]
+): { apiKey: string; modelName: string } {
+  const activeModel = models.find((m) => {
+    const id = String(m.model_identifier ?? "").toLowerCase();
+    const prov = String(
+      (m as unknown as Record<string, unknown>).provider_key ?? ""
+    ).toLowerCase();
+    return id.includes("gemini") || prov.includes("gemini") || prov.includes("google");
+  });
+
+  const preferredModel = activeModel?.model_identifier || CHAT_MODELS[0];
+
+  for (const p of providers) {
+    const row = p as unknown as Record<string, unknown>;
+    const pKey = String(
+      row.provider_key ?? row.provider_name ?? row.name ?? ""
+    ).toLowerCase();
+    const candidateKey = String(
+      row.api_key ??
+        row.apiKey ??
+        row.encrypted_api_key ??
+        row.key_value ??
+        row.secret_key ??
+        ""
+    ).trim();
+
+    if (
+      candidateKey &&
+      (pKey.includes("gemini") ||
+        pKey.includes("google") ||
+        candidateKey.startsWith("AIza"))
+    ) {
+      return { apiKey: candidateKey, modelName: preferredModel };
+    }
+  }
+
+  const envKey =
     process.env.GEMINI_API_KEY?.trim() ||
     process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim() ||
-    process.env.NEXT_PUBLIC_GEMINI_API_KEY?.trim();
+    "";
 
-  if (fromProcess) return fromProcess;
-
-  const globalObj = globalThis as Record<string, unknown>;
-  for (const keyName of [
-    "GEMINI_API_KEY",
-    "GOOGLE_GENERATIVE_AI_API_KEY",
-  ]) {
-    const val = globalObj[keyName];
-    if (typeof val === "string" && val.trim()) {
-      return val.trim();
-    }
-  }
-
-  try {
-    const supabaseUrl =
-      process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() ||
-      (typeof globalObj.NEXT_PUBLIC_SUPABASE_URL === "string"
-        ? globalObj.NEXT_PUBLIC_SUPABASE_URL.trim()
-        : "");
-    const supabaseKey =
-      process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim() ||
-      "";
-
-    if (supabaseUrl && supabaseKey) {
-      const sb = createClient(supabaseUrl, supabaseKey, {
-        auth: { persistSession: false },
-      });
-
-      const { data: providers } = await sb
-        .from("ai_providers")
-        .select("*")
-        .eq("is_active", true);
-
-      if (Array.isArray(providers)) {
-        for (const row of providers as Array<Record<string, unknown>>) {
-          const pKey = String(
-            row.provider_key ?? row.provider_name ?? row.name ?? ""
-          ).toLowerCase();
-          const apiKey = String(
-            row.api_key ?? row.encrypted_api_key ?? row.key_value ?? ""
-          ).trim();
-
-          if (
-            apiKey &&
-            (pKey.includes("gemini") ||
-              pKey.includes("google") ||
-              apiKey.startsWith("AIza"))
-          ) {
-            return apiKey;
-          }
-        }
-      }
-    }
-  } catch {
-    // Abaikan jika gagal membaca key dari Supabase
-  }
-
-  return "";
+  return { apiKey: envKey, modelName: preferredModel };
 }
 
 export async function POST(req: NextRequest) {
   try {
+    const supabase = await createSupabaseServerClient();
+    if (!supabase) {
+      return NextResponse.json(
+        { ok: false, error: "Konfigurasi Supabase server belum lengkap." },
+        { status: 500 }
+      );
+    }
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      return NextResponse.json(
+        { ok: false, error: "Sesi tidak valid. Silakan login terlebih dahulu." },
+        { status: 401 }
+      );
+    }
+
     let body: ChatRequestBody = {};
     try {
       body = (await req.json()) as ChatRequestBody;
@@ -127,28 +126,78 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const geminiApiKey = await resolveGeminiApiKey();
-    if (!geminiApiKey) {
+    let projectContext: DbProject | null = null;
+    let memories: DbMemory[] = [];
+
+    if (body.projectId) {
+      const [{ data: proj }, { data: memRows }] = await Promise.all([
+        supabase.from("projects").select("*").eq("id", body.projectId).single(),
+        supabase
+          .from("memories")
+          .select("*")
+          .eq("user_id", user.id)
+          .or(
+            `project_id.eq.${body.projectId},and(scope.eq.user,project_id.is.null)`
+          )
+          .order("importance", { ascending: false })
+          .limit(10),
+      ]);
+      projectContext = (proj as DbProject) ?? null;
+      memories = (memRows as DbMemory[]) ?? [];
+    }
+
+    const [{ data: providers }, { data: models }] = await Promise.all([
+      supabase
+        .from("ai_providers")
+        .select("*")
+        .eq("is_enabled", true)
+        .order("priority_order", { ascending: true }),
+      supabase.from("ai_models").select("*").eq("is_active", true),
+    ]);
+
+    const { apiKey, modelName } = extractGeminiKeyFromProviders(
+      (providers as DbAiProvider[]) ?? [],
+      (models as DbAiModel[]) ?? []
+    );
+
+    if (!apiKey) {
       return NextResponse.json(
         {
           ok: false,
           error:
-            "API key Gemini belum terbaca di environment Worker maupun tabel ai_providers.",
+            "API key Gemini tidak ditemukan pada konfigurasi ai_providers maupun environment server.",
         },
         { status: 500 }
       );
     }
+
+    const contextNote = projectContext
+      ? `\nKonteks proyek aktif: ${projectContext.name}${
+          projectContext.description ? ` — ${projectContext.description}` : ""
+        }.${
+          memories.length > 0
+            ? `\nCatatan memori relevan:\n${memories
+                .slice(0, 5)
+                .map((m) => `- ${m.memory_key}: ${m.content}`)
+                .join("\n")}`
+            : ""
+        }`
+      : "";
 
     const contents = turns.map((turn) => ({
       role: turn.role === "assistant" ? "model" : "user",
       parts: [{ text: turn.content.trim() }],
     }));
 
+    const modelQueue = Array.from(
+      new Set([modelName, ...CHAT_MODELS].filter(Boolean))
+    );
+
     let lastError = "";
-    for (const model of CHAT_MODELS) {
+    for (const model of modelQueue) {
       try {
         const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
-          geminiApiKey
+          apiKey
         )}`;
 
         const response = await fetch(endpoint, {
@@ -156,7 +205,7 @@ export async function POST(req: NextRequest) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             systemInstruction: {
-              parts: [{ text: EASY_GOING_SYSTEM_PROMPT }],
+              parts: [{ text: `${EASY_GOING_SYSTEM_PROMPT}${contextNote}` }],
             },
             contents,
             generationConfig: {
