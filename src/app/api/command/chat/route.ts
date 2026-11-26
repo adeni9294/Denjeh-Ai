@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getGeminiKey } from "@/lib/getEnv";
-import { DbMemory, DbProject } from "@/types/studio";
+import { DbAiModel, DbAiProvider, DbMemory, DbProject } from "@/types/studio";
 
 interface ChatTurn {
   role: "user" | "assistant";
@@ -14,7 +14,7 @@ interface ChatRequestBody {
   messages?: ChatTurn[];
 }
 
-const GEMINI_CHAT_MODELS = [
+const DEFAULT_GEMINI_CHAT_MODELS = [
   "gemini-2.5-flash",
   "gemini-2.5-flash-lite",
   "gemini-2.0-flash",
@@ -27,6 +27,70 @@ Aturan utama:
 - Jika pengguna sedang brainstorming, bertanya ringan, atau mendiskusikan ide/alur, balas secara dialogis dan tawarkan pertanyaan lanjutan atau sudut pandang baru yang relevan.
 - Jangan memaksa membuat rencana DAG, JSON, atau format agen yang kaku kecuali pengguna secara eksplisit meminta rencana langkah atau eksekusi tugas.
 - Tetap ringkas dan jelas, sesuaikan panjang jawaban dengan konteks obrolan.`;
+
+function decodeStoredKey(encoded: string | null | undefined): string | null {
+  if (!encoded) return null;
+  const trimmed = encoded.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith("enc_v1:")) {
+    try {
+      return Buffer.from(trimmed.slice(7), "base64").toString("utf-8").trim();
+    } catch {
+      return null;
+    }
+  }
+  return trimmed;
+}
+
+async function resolveGeminiChatConfig(
+  providers: DbAiProvider[],
+  models: DbAiModel[]
+): Promise<{
+  apiKey: string;
+  baseUrl: string;
+  candidateModels: string[];
+}> {
+  const sortedProviders = [...providers].sort(
+    (a, b) => (a.priority_order ?? 99) - (b.priority_order ?? 99)
+  );
+
+  for (const provider of sortedProviders) {
+    const isGemini =
+      provider.provider_key === "gemini" ||
+      (provider.base_url ?? "").includes("generativelanguage.googleapis.com");
+    if (!isGemini) continue;
+
+    const decodedKey = decodeStoredKey(provider.encrypted_api_key);
+    if (!decodedKey) continue;
+
+    const providerModels = models
+      .filter((m) => m.provider_id === provider.id && m.is_active)
+      .sort((a, b) => Number(b.is_default) - Number(a.is_default))
+      .map((m) => m.model_identifier?.trim())
+      .filter((m): m is string => Boolean(m));
+
+    const candidateModels = Array.from(
+      new Set([...providerModels, ...DEFAULT_GEMINI_CHAT_MODELS])
+    );
+
+    const baseUrl = (
+      provider.base_url || "https://generativelanguage.googleapis.com/v1beta"
+    ).replace(/\/$/, "");
+
+    return {
+      apiKey: decodedKey,
+      baseUrl,
+      candidateModels,
+    };
+  }
+
+  const envKey = await getGeminiKey();
+  return {
+    apiKey: envKey,
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    candidateModels: DEFAULT_GEMINI_CHAT_MODELS,
+  };
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -85,18 +149,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const geminiApiKey = await getGeminiKey();
-    if (!geminiApiKey) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error:
-            "GEMINI_API_KEY belum terbaca lewat getGeminiKey() di runtime Cloudflare / server.",
-        },
-        { status: 500 }
-      );
-    }
-
     let projectContext: DbProject | null = null;
     let memories: DbMemory[] = [];
 
@@ -115,6 +167,31 @@ export async function POST(req: NextRequest) {
       ]);
       projectContext = (proj as DbProject) ?? null;
       memories = (memRows as DbMemory[]) ?? [];
+    }
+
+    const [{ data: providers }, { data: models }] = await Promise.all([
+      supabase
+        .from("ai_providers")
+        .select("*")
+        .eq("is_enabled", true)
+        .order("priority_order", { ascending: true }),
+      supabase.from("ai_models").select("*").eq("is_active", true),
+    ]);
+
+    const { apiKey, baseUrl, candidateModels } = await resolveGeminiChatConfig(
+      (providers as DbAiProvider[]) ?? [],
+      (models as DbAiModel[]) ?? []
+    );
+
+    if (!apiKey) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "API key Gemini tidak ditemukan pada provider aktif maupun environment server.",
+        },
+        { status: 500 }
+      );
     }
 
     const contextNote = projectContext
@@ -136,10 +213,10 @@ export async function POST(req: NextRequest) {
     }));
 
     let lastError = "";
-    for (const model of GEMINI_CHAT_MODELS) {
+    for (const model of candidateModels) {
       try {
-        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
-          geminiApiKey
+        const endpoint = `${baseUrl}/models/${model}:generateContent?key=${encodeURIComponent(
+          apiKey
         )}`;
 
         const response = await fetch(endpoint, {
