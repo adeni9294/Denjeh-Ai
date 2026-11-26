@@ -18,6 +18,7 @@ import {
   SlidersHorizontal,
   Copy,
   Check,
+  X,
   ArrowUpRight,
   Cpu,
   Video,
@@ -37,6 +38,22 @@ export type StudioModuleKey =
   | "analytics";
 
 export type FormatTabKey = "text" | "photo" | "video";
+
+export type DailySlotKind = "story" | "photo" | "text" | "reels";
+export type DailySlotCheckStatus = "pending" | "success" | "failed";
+
+export interface DailyScheduleSlot {
+  id: string;
+  dateCode: string;
+  timeLabel: string;
+  kind: DailySlotKind;
+  title: string;
+  caption: string;
+  mediaUrl?: string;
+  status: DailySlotCheckStatus;
+  statusNote?: string;
+  lastRunAt?: string;
+}
 
 interface UsageLogRow {
   id: string;
@@ -79,6 +96,48 @@ const FALLBACK_MODEL_OPTIONS = [
   { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite (Free)" },
   { id: "llama-3.3-70b-versatile", label: "Llama 3.3 70B Versatile (Groq)" },
   { id: "llama-3.1-8b-instant", label: "Llama 3.1 8B Instant (Groq)" },
+];
+
+const DEFAULT_DAILY_SLOTS: DailyScheduleSlot[] = [
+  {
+    id: "slot-0800-story",
+    dateCode: "261126",
+    timeLabel: "08.00",
+    kind: "story",
+    title: "Posting Story Pagi — DNAverse Teaser",
+    caption: "DNA-Spiral aktif pagi ini. Siap hadapi Guardian?",
+    mediaUrl: "",
+    status: "pending",
+  },
+  {
+    id: "slot-1100-photo",
+    dateCode: "261126",
+    timeLabel: "11.00",
+    kind: "photo",
+    title: "Posting Foto — Keyframe Karakter Aria",
+    caption: "Aria menemukan DNA-Spiral kuno di reruntuhan energi elemental.",
+    mediaUrl: "",
+    status: "pending",
+  },
+  {
+    id: "slot-1500-text",
+    dateCode: "261126",
+    timeLabel: "15.00",
+    kind: "text",
+    title: "Posting Teks — Lore & Hook Sore",
+    caption: "Dalam 60 detik, satu energi DNA bisa mengubah segalanya.",
+    status: "pending",
+  },
+  {
+    id: "slot-1900-reels",
+    dateCode: "261126",
+    timeLabel: "19.00",
+    kind: "reels",
+    title: "Posting Reels — Cuplikan Aksi 60 Detik",
+    caption: "Guardian elemental terbangun. Tonton potongan aksinya sekarang.",
+    mediaUrl: "",
+    status: "pending",
+  },
 ];
 
 // Filter otomatis untuk menghapus accessToken, blok prepare_facebook_page_payload, dan pesan (#200)
@@ -126,6 +185,10 @@ export function StudioModulesWorkspace({
   const [generatingPhotoTaskId, setGeneratingPhotoTaskId] = useState<
     string | null
   >(null);
+  const [dailySlots, setDailySlots] =
+    useState<DailyScheduleSlot[]>(DEFAULT_DAILY_SLOTS);
+  const [runningSlotId, setRunningSlotId] = useState<string | null>(null);
+  const [runningAllSlots, setRunningAllSlots] = useState(false);
   const [fbPageId, setFbPageId] = useState("");
   const [fbAccessToken, setFbAccessToken] = useState("");
   const [hasSavedFbCreds, setHasSavedFbCreds] = useState(false);
@@ -386,6 +449,106 @@ export function StudioModulesWorkspace({
       });
     } finally {
       setSavingFbCreds(false);
+    }
+  };
+
+  const executeSingleDailySlot = async (slot: DailyScheduleSlot) => {
+    setRunningSlotId(slot.id);
+    const nowStr = new Date().toLocaleTimeString("id-ID", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+
+    try {
+      const mappedPublishType =
+        slot.kind === "reels"
+          ? "reels"
+          : slot.kind === "photo" || slot.kind === "story"
+          ? "photo"
+          : "text";
+
+      const res = await fetch("/api/publish/facebook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: selectedProject || null,
+          pageId: fbPageId,
+          accessToken: fbAccessToken,
+          publishType: mappedPublishType,
+          slotKind: slot.kind,
+          caption: sanitizeCaptionText(slot.caption, slot.title),
+          photoUrl:
+            slot.kind === "photo" || slot.kind === "story"
+              ? slot.mediaUrl || ""
+              : "",
+          videoUrl: slot.kind === "reels" ? slot.mediaUrl || "" : "",
+        }),
+      });
+
+      const data = (await res.json()) as {
+        ok?: boolean;
+        postId?: string;
+        error?: string;
+      };
+
+      if (!res.ok || !data.ok) {
+        setDailySlots((prev) =>
+          prev.map((item) =>
+            item.id === slot.id
+              ? {
+                  ...item,
+                  status: "failed",
+                  statusNote: data.error || "Gagal posting",
+                  lastRunAt: `${nowStr} WIB`,
+                }
+              : item
+          )
+        );
+        return;
+      }
+
+      setDailySlots((prev) =>
+        prev.map((item) =>
+          item.id === slot.id
+            ? {
+                ...item,
+                status: "success",
+                statusNote: data.postId
+                  ? `Sukses posting (ID: ${data.postId})`
+                  : "Sukses posting",
+                lastRunAt: `${nowStr} WIB`,
+              }
+            : item
+        )
+      );
+    } catch (err) {
+      setDailySlots((prev) =>
+        prev.map((item) =>
+          item.id === slot.id
+            ? {
+                ...item,
+                status: "failed",
+                statusNote:
+                  err instanceof Error ? err.message : "Gagal koneksi jaringan",
+                lastRunAt: `${nowStr} WIB`,
+              }
+            : item
+        )
+      );
+    } finally {
+      setRunningSlotId(null);
+    }
+  };
+
+  const handleRunAllDailySlots = async () => {
+    if (runningAllSlots || runningSlotId) return;
+    setRunningAllSlots(true);
+    try {
+      for (const slot of dailySlots) {
+        await executeSingleDailySlot(slot);
+      }
+    } finally {
+      setRunningAllSlots(false);
     }
   };
 
@@ -1081,48 +1244,140 @@ export function StudioModulesWorkspace({
           )}
         </div>
       ) : moduleKey === "planner" ? (
-        <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <CalendarDays className="h-5 w-5 text-emerald-400" />
-              <h2 className="text-base font-semibold">
-                Content Planner & Jadwal Produksi ({tasks.length} Item)
-              </h2>
+        <div className="space-y-4">
+          <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="text-base font-semibold">
+                  Ceklis Jadwal Posting Harian (Tanggal 261126)
+                </h2>
+                <p className="text-xs text-slate-400">
+                  Asisten menjalankan slot harian sesuai jam: centang hijau (✓)
+                  bila sukses posting dan silang merah (✕) bila gagal posting.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                disabled={runningAllSlots || Boolean(runningSlotId)}
+                onClick={() => void handleRunAllDailySlots()}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
+              >
+                <Play className="h-3.5 w-3.5" />
+                <span>
+                  {runningAllSlots
+                    ? "Menjalankan Jadwal..."
+                    : "Jalankan Semua Slot Hari Ini"}
+                </span>
+              </button>
             </div>
-            <Badge variant="emerald">Terhubung ke Tasks</Badge>
+
+            <div className="space-y-2">
+              {dailySlots.map((slot) => {
+                const isRunningThis = runningSlotId === slot.id;
+                return (
+                  <div
+                    key={slot.id}
+                    className="rounded-xl border border-slate-700/60 bg-slate-900/70 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                  >
+                    <div className="space-y-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="rounded bg-slate-800 px-2 py-0.5 font-mono text-[11px] text-blue-300">
+                          {slot.dateCode} • {slot.timeLabel}
+                        </span>
+                        <span className="font-semibold text-slate-100">
+                          {slot.title}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 truncate">
+                        {slot.caption}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2.5 shrink-0 flex-wrap">
+                      {slot.status === "success" ? (
+                        <span className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
+                          <Check className="h-3.5 w-3.5" />
+                          <span>
+                            {slot.statusNote || "Sukses posting"}
+                            {slot.lastRunAt ? ` (${slot.lastRunAt})` : ""}
+                          </span>
+                        </span>
+                      ) : slot.status === "failed" ? (
+                        <span className="inline-flex items-center gap-1 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2.5 py-1 text-[11px] font-semibold text-rose-300">
+                          <X className="h-3.5 w-3.5" />
+                          <span>
+                            {slot.statusNote
+                              ? `Gagal posting: ${slot.statusNote}`
+                              : "Gagal posting"}
+                            {slot.lastRunAt ? ` (${slot.lastRunAt})` : ""}
+                          </span>
+                        </span>
+                      ) : (
+                        <Badge variant="amber">Menunggu Jadwal</Badge>
+                      )}
+
+                      <button
+                        type="button"
+                        disabled={isRunningThis || runningAllSlots}
+                        onClick={() => void executeSingleDailySlot(slot)}
+                        className="rounded-lg border border-blue-500/40 bg-blue-600/20 px-2.5 py-1 text-[11px] font-semibold text-blue-200 hover:bg-blue-600/30 disabled:opacity-50"
+                      >
+                        {isRunningThis ? "Memproses..." : "Jalankan Slot"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
 
-          <div className="space-y-2">
-            {tasks.map((t) => {
-              const payload = (t.input_payload ?? {}) as Record<string, unknown>;
-              const stepOrder = Number(payload.stepOrder ?? t.step_order ?? 1);
-              return (
-                <div
-                  key={t.id}
-                  className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
-                >
-                  <div>
-                    <p className="font-semibold">
-                      #{stepOrder} • {t.title}
-                    </p>
-                    <p className="text-[11px] text-slate-400">
-                      Target: {String(payload.estimatedOutput || "Artefak")} •
-                      Dibuat:{" "}
-                      {new Date(t.created_at).toLocaleDateString("id-ID", {
-                        day: "2-digit",
-                        month: "short",
-                        year: "numeric",
-                      })}
-                    </p>
-                  </div>
-                  <Badge
-                    variant={t.status === "completed" ? "emerald" : "amber"}
+          <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <CalendarDays className="h-5 w-5 text-emerald-400" />
+                <h2 className="text-base font-semibold">
+                  Content Planner & Jadwal Produksi ({tasks.length} Item)
+                </h2>
+              </div>
+              <Badge variant="emerald">Terhubung ke Tasks</Badge>
+            </div>
+
+            <div className="space-y-2">
+              {tasks.map((t) => {
+                const payload = (t.input_payload ?? {}) as Record<
+                  string,
+                  unknown
+                >;
+                const stepOrder = Number(payload.stepOrder ?? t.step_order ?? 1);
+                return (
+                  <div
+                    key={t.id}
+                    className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
                   >
-                    {t.status}
-                  </Badge>
-                </div>
-              );
-            })}
+                    <div>
+                      <p className="font-semibold">
+                        #{stepOrder} • {t.title}
+                      </p>
+                      <p className="text-[11px] text-slate-400">
+                        Target: {String(payload.estimatedOutput || "Artefak")} •
+                        Dibuat:{" "}
+                        {new Date(t.created_at).toLocaleDateString("id-ID", {
+                          day: "2-digit",
+                          month: "short",
+                          year: "numeric",
+                        })}
+                      </p>
+                    </div>
+                    <Badge
+                      variant={t.status === "completed" ? "emerald" : "amber"}
+                    >
+                      {t.status}
+                    </Badge>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
       ) : moduleKey === "publishing" ? (
