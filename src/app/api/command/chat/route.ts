@@ -21,6 +21,28 @@ Aturan utama:
 - Jangan memaksa membuat rencana DAG, JSON, atau format agen yang kaku kecuali pengguna secara eksplisit meminta rencana langkah atau eksekusi tugas.
 - Tetap ringkas dan jelas, sesuaikan panjang jawaban dengan konteks obrolan.`;
 
+async function resolveGeminiApiKey(): Promise<string> {
+  const fromProcess = process.env.GEMINI_API_KEY?.trim();
+  if (fromProcess) return fromProcess;
+
+  try {
+    const cloudflareMod = await import("@opennextjs/cloudflare");
+    if (typeof cloudflareMod.getCloudflareContext === "function") {
+      const ctx = await cloudflareMod.getCloudflareContext({ async: true });
+      const envObj = ctx?.env as Record<string, unknown> | undefined;
+      const fromCf =
+        typeof envObj?.GEMINI_API_KEY === "string"
+          ? envObj.GEMINI_API_KEY.trim()
+          : "";
+      if (fromCf) return fromCf;
+    }
+  } catch {
+    // Abaikan jika bukan runtime OpenNext Cloudflare
+  }
+
+  return "";
+}
+
 export async function POST(req: NextRequest) {
   try {
     let body: ChatRequestBody = {};
@@ -33,7 +55,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const directMessage = typeof body.message === "string" ? body.message.trim() : "";
+    const directMessage =
+      typeof body.message === "string" ? body.message.trim() : "";
     const history = Array.isArray(body.messages) ? body.messages : [];
 
     const turns: ChatTurn[] =
@@ -58,7 +81,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const geminiApiKey = process.env.GEMINI_API_KEY?.trim();
+    const geminiApiKey = await resolveGeminiApiKey();
     if (!geminiApiKey) {
       return NextResponse.json(
         {
