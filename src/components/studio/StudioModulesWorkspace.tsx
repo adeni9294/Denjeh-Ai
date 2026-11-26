@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import Link from "next/link";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { DbAiModel, DbProject, DbTask, DbWorkflowRun } from "@/types/studio";
@@ -38,6 +38,8 @@ export type StudioModuleKey =
   | "analytics";
 
 export type FormatTabKey = "text" | "photo" | "video";
+
+export type DivisionFilterKey = "all" | "text" | "photo" | "story" | "reels";
 
 export type DailySlotKind = "story" | "photo" | "text" | "reels";
 export type DailySlotCheckStatus = "pending" | "success" | "failed";
@@ -157,6 +159,32 @@ function sanitizeCaptionText(raw: string, fallbackTitle: string): string {
   return cleaned || fallbackTitle;
 }
 
+function inferTaskDivision(
+  t: TaskWithPayloads
+): Exclude<DivisionFilterKey, "all"> {
+  const payload = (t.input_payload ?? {}) as Record<string, unknown>;
+  const raw = `${t.title ?? ""} ${String(payload.agentCode ?? "")} ${String(
+    payload.contentType ?? ""
+  )}`.toLowerCase();
+
+  if (raw.includes("reels") || raw.includes("video") || raw.includes("action")) {
+    return "reels";
+  }
+  if (raw.includes("story") || raw.includes("teaser")) {
+    return "story";
+  }
+  if (
+    raw.includes("foto") ||
+    raw.includes("photo") ||
+    raw.includes("visual") ||
+    raw.includes("character") ||
+    raw.includes("gambar")
+  ) {
+    return "photo";
+  }
+  return "text";
+}
+
 export function StudioModulesWorkspace({
   moduleKey,
 }: {
@@ -181,6 +209,9 @@ export function StudioModulesWorkspace({
   const [activeFormatTabs, setActiveFormatTabs] = useState<
     Record<string, FormatTabKey>
   >({});
+  const [divisionFilter, setDivisionFilter] =
+    useState<DivisionFilterKey>("all");
+  const [showAllCompleted, setShowAllCompleted] = useState(false);
   const [photoPrompts, setPhotoPrompts] = useState<Record<string, string>>({});
   const [generatingPhotoTaskId, setGeneratingPhotoTaskId] = useState<
     string | null
@@ -972,6 +1003,15 @@ export function StudioModulesWorkspace({
   };
 
   const completedTasks = tasks.filter((t) => t.status === "completed");
+
+  const filteredCompletedTasks = useMemo(() => {
+    const base =
+      divisionFilter === "all"
+        ? completedTasks
+        : completedTasks.filter((t) => inferTaskDivision(t) === divisionFilter);
+    return showAllCompleted ? base : base.slice(0, 3);
+  }, [completedTasks, divisionFilter, showAllCompleted]);
+
   const totalInputTokens = usageLogs.reduce(
     (acc, u) => acc + Number(u.input_tokens ?? 0),
     0
@@ -1382,17 +1422,15 @@ export function StudioModulesWorkspace({
         </div>
       ) : moduleKey === "publishing" ? (
         <div className="space-y-4">
-          <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
+          <div className="glass-panel rounded-2xl p-4 sm:p-5 space-y-3">
             <div className="flex items-center justify-between flex-wrap gap-2">
               <div>
                 <h2 className="text-base font-semibold">
                   Koneksi Facebook Page Graph API & Otomatisasi App
                 </h2>
                 <p className="text-xs text-slate-400">
-                  Jalankan alur otomatis (simpan hasil render + posting Video
-                  Reels, Foto, atau Teks ke Facebook Page) langsung dari
-                  aplikasi DENJEH AI atau via webhook{" "}
-                  <code className="text-blue-300">/api/render/callback</code>.
+                  Simpan kredensial halaman lalu rilis konten Teks, Foto,
+                  Story, atau Reels ke Facebook Page.
                 </p>
               </div>
               <Badge variant={hasSavedFbCreds ? "emerald" : "amber"}>
@@ -1468,26 +1506,71 @@ export function StudioModulesWorkspace({
             )}
           </div>
 
-          <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
-            <div className="flex items-center justify-between">
+          <div className="glass-panel rounded-2xl p-4 sm:p-5 space-y-3.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <Send className="h-5 w-5 text-purple-400" />
-                <h2 className="text-base font-semibold">
-                  Publishing Center — Paket Video Reels, Foto & Teks (
-                  {completedTasks.length})
-                </h2>
+                <div>
+                  <h2 className="text-base font-semibold">
+                    Publishing Center — Meja Kerja Divisi (
+                    {completedTasks.length} Selesai)
+                  </h2>
+                  <p className="text-[11px] text-slate-400">
+                    Saring per divisi agar tampilan tetap tenang dan tidak
+                    menumpuk.
+                  </p>
+                </div>
               </div>
-              <Badge variant="purple">3 Tab Terpisah</Badge>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <Badge variant="purple">Teks • Foto • Story • Reels</Badge>
+                {completedTasks.length > 3 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAllCompleted((prev) => !prev)}
+                    className="rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-700"
+                  >
+                    {showAllCompleted
+                      ? "Ringkas (3 Item)"
+                      : `Lihat Semua (${completedTasks.length})`}
+                  </button>
+                )}
+              </div>
             </div>
 
-            {completedTasks.length === 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {(
+                [
+                  { key: "all", label: "Semua" },
+                  { key: "text", label: "Divisi Teks" },
+                  { key: "photo", label: "Divisi Foto" },
+                  { key: "story", label: "Divisi Story" },
+                  { key: "reels", label: "Divisi Reels" },
+                ] as { key: DivisionFilterKey; label: string }[]
+              ).map((pill) => (
+                <button
+                  key={pill.key}
+                  type="button"
+                  onClick={() => setDivisionFilter(pill.key)}
+                  className={`rounded-lg px-2.5 py-1 text-[11px] font-semibold transition ${
+                    divisionFilter === pill.key
+                      ? "bg-blue-600 text-white"
+                      : "border border-slate-800 bg-slate-900/80 text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  {pill.label}
+                </button>
+              ))}
+            </div>
+
+            {filteredCompletedTasks.length === 0 ? (
               <p className="text-xs text-slate-400">
-                Belum ada tugas selesai. Jalankan agen di AI Command Center
-                untuk menyiapkan materi rilis.
+                Belum ada tugas selesai untuk filter divisi ini. Jalankan agen
+                di AI Command Center untuk menyiapkan materi rilis.
               </p>
             ) : (
               <div className="space-y-3">
-                {completedTasks.map((t) => {
+                {filteredCompletedTasks.map((t) => {
                   const item = publishItems[t.id] ?? getPublishItemState(t);
                   const currentTab = getActiveTab(t, item);
                   const feedback = publishFeedback[t.id];
@@ -1504,12 +1587,12 @@ export function StudioModulesWorkspace({
                   return (
                     <div
                       key={t.id}
-                      className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-4 space-y-3 text-xs"
+                      className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-3.5 space-y-2.5 text-xs"
                     >
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="space-y-1">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="space-y-1 min-w-0 flex-1">
                           <div className="flex items-center gap-2 flex-wrap">
-                            <span className="font-semibold text-sm">
+                            <span className="font-semibold text-sm truncate">
                               {t.title}
                             </span>
                             {renderStatus === "completed" && (
@@ -1517,9 +1600,8 @@ export function StudioModulesWorkspace({
                             )}
                           </div>
                           <div className="flex items-center gap-2 flex-wrap text-[11px] text-slate-400">
-                            <span>Task ID:</span>
                             <code className="rounded bg-slate-800 px-1.5 py-0.5 text-slate-200">
-                              {t.id}
+                              #{t.id.slice(0, 8)}
                             </code>
                             <button
                               type="button"
@@ -1534,16 +1616,16 @@ export function StudioModulesWorkspace({
                               ) : (
                                 <>
                                   <Copy className="h-3 w-3" />
-                                  <span>Salin Task ID</span>
+                                  <span>Salin ID</span>
                                 </>
                               )}
                             </button>
+                            {publishedId && (
+                              <span className="text-emerald-400">
+                                • FB ID: {publishedId}
+                              </span>
+                            )}
                           </div>
-                          {publishedId && (
-                            <p className="text-[11px] text-emerald-400">
-                              Terakhir rilis ke FB Post ID: {publishedId}
-                            </p>
-                          )}
                         </div>
 
                         <div className="flex items-center gap-1.5 flex-wrap">
@@ -1552,7 +1634,7 @@ export function StudioModulesWorkspace({
                             onClick={() =>
                               handleToggleAutoPublishOnRender(t, item)
                             }
-                            className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-medium transition ${
+                            className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium transition ${
                               item.autoPublishOnRender
                                 ? "border-amber-500/50 bg-amber-500/20 text-amber-200"
                                 : "border-slate-700 bg-slate-800/70 text-slate-400 hover:text-slate-200"
@@ -1560,9 +1642,7 @@ export function StudioModulesWorkspace({
                           >
                             <Zap className="h-3 w-3" />
                             <span>
-                              {item.autoPublishOnRender
-                                ? "Auto-Render→FB: ON"
-                                : "Auto-Render→FB: OFF"}
+                              {item.autoPublishOnRender ? "Auto ON" : "Auto OFF"}
                             </span>
                           </button>
 
@@ -1580,82 +1660,71 @@ export function StudioModulesWorkspace({
                           >
                             <Play className="h-3 w-3" />
                             <span>
-                              {isRunningAutoThis
-                                ? "Menjalankan..."
-                                : "Jalankan Otomatis"}
+                              {isRunningAutoThis ? "Jalan..." : "Jalankan"}
                             </span>
                           </button>
 
                           <button
                             type="button"
                             onClick={() => handleCopyText(t.id, item.caption)}
-                            className="inline-flex items-center gap-1 rounded-lg border border-slate-600/40 bg-slate-800/70 px-2.5 py-1 text-[11px] text-slate-200 hover:bg-slate-700/70"
+                            className="inline-flex items-center gap-1 rounded-lg border border-slate-600/40 bg-slate-800/70 px-2 py-1 text-[11px] text-slate-200 hover:bg-slate-700/70"
                           >
                             {copiedKey === t.id ? (
-                              <>
-                                <Check className="h-3 w-3 text-emerald-400" />
-                                <span>Tersalin</span>
-                              </>
+                              <Check className="h-3 w-3 text-emerald-400" />
                             ) : (
-                              <>
-                                <Copy className="h-3 w-3 text-blue-400" />
-                                <span>Salin Caption</span>
-                              </>
+                              <Copy className="h-3 w-3 text-blue-400" />
                             )}
+                            <span>Salin</span>
                           </button>
                         </div>
                       </div>
 
-                      {/* 3 Tab Keluaran Terpisah: Tab Teks, Tab Foto, Tab Video */}
-                      <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                        <div className="inline-flex flex-wrap gap-1.5 rounded-xl border border-slate-800 bg-slate-900/90 p-1">
+                      <div className="space-y-2.5 rounded-xl border border-slate-800 bg-slate-950/70 p-2.5">
+                        <div className="inline-flex flex-wrap gap-1 rounded-lg border border-slate-800 bg-slate-900/90 p-1">
                           <button
                             type="button"
                             onClick={() => selectFormatTab(t, item, "text")}
-                            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[11px] font-semibold transition ${
+                            className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
                               currentTab === "text"
                                 ? "bg-emerald-600 text-white"
                                 : "text-slate-400 hover:text-slate-200"
                             }`}
                           >
-                            <FileText className="h-3.5 w-3.5" />
-                            <span>Tab Teks</span>
+                            <FileText className="h-3 w-3" />
+                            <span>Teks</span>
                           </button>
 
                           <button
                             type="button"
                             onClick={() => selectFormatTab(t, item, "photo")}
-                            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[11px] font-semibold transition ${
+                            className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
                               currentTab === "photo"
                                 ? "bg-blue-600 text-white"
                                 : "text-slate-400 hover:text-slate-200"
                             }`}
                           >
-                            <ImageIcon className="h-3.5 w-3.5" />
-                            <span>Tab Foto</span>
+                            <ImageIcon className="h-3 w-3" />
+                            <span>Foto</span>
                           </button>
 
                           <button
                             type="button"
                             onClick={() => selectFormatTab(t, item, "video")}
-                            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[11px] font-semibold transition ${
+                            className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
                               currentTab === "video"
                                 ? "bg-purple-600 text-white"
                                 : "text-slate-400 hover:text-slate-200"
                             }`}
                           >
-                            <Video className="h-3.5 w-3.5" />
-                            <span>Tab Video</span>
+                            <Video className="h-3 w-3" />
+                            <span>Reels</span>
                           </button>
                         </div>
 
                         {currentTab === "text" && (
-                          <div className="space-y-2.5">
-                            <label className="text-[11px] text-emerald-300 font-medium block">
-                              Keluaran Teks — Caption / Hook / Tagar Rilis
-                            </label>
+                          <div className="space-y-2">
                             <textarea
-                              rows={5}
+                              rows={3}
                               value={item.caption}
                               onChange={(e) =>
                                 updatePublishItemState(t.id, item, {
@@ -1663,53 +1732,46 @@ export function StudioModulesWorkspace({
                                   caption: e.target.value,
                                 })
                               }
-                              className="w-full resize-none rounded-lg border border-slate-700 bg-slate-900/90 p-2.5 text-xs text-slate-200"
+                              className="w-full max-h-28 resize-none rounded-lg border border-slate-700 bg-slate-900/90 p-2 text-xs text-slate-200"
                             />
-                            <div className="flex flex-wrap gap-2">
-                              <button
-                                type="button"
-                                disabled={
-                                  isPublishingThis ||
-                                  isRunningAutoThis ||
-                                  isGeneratingPhotoThis
-                                }
-                                onClick={() => {
-                                  updatePublishItemState(t.id, item, {
-                                    publishType: "text",
-                                  });
-                                  void handleFacebookAutoPost(t, "text");
-                                }}
-                                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
-                              >
-                                <Send className="h-3 w-3" />
-                                <span>
-                                  {isPublishingThis
-                                    ? "Mempublikasikan Teks..."
-                                    : "Posting Format Teks ke FB"}
-                                </span>
-                              </button>
-                            </div>
+                            <button
+                              type="button"
+                              disabled={
+                                isPublishingThis ||
+                                isRunningAutoThis ||
+                                isGeneratingPhotoThis
+                              }
+                              onClick={() => {
+                                updatePublishItemState(t.id, item, {
+                                  publishType: "text",
+                                });
+                                void handleFacebookAutoPost(t, "text");
+                              }}
+                              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
+                            >
+                              <Send className="h-3 w-3" />
+                              <span>
+                                {isPublishingThis
+                                  ? "Memposting..."
+                                  : "Posting Teks ke FB"}
+                              </span>
+                            </button>
                           </div>
                         )}
 
                         {currentTab === "photo" && (
-                          <div className="space-y-2.5">
-                            <div className="space-y-1">
-                              <label className="text-[11px] text-blue-300 font-medium block">
-                                Prompt Gambar (Gemini → Supabase Storage)
-                              </label>
-                              <textarea
-                                rows={2}
-                                value={getPhotoPrompt(t, item)}
-                                onChange={(e) =>
-                                  setPhotoPrompts((prev) => ({
-                                    ...prev,
-                                    [t.id]: e.target.value,
-                                  }))
-                                }
-                                className="w-full resize-none rounded-lg border border-slate-700 bg-slate-900/90 p-2 text-xs text-slate-200"
-                              />
-                            </div>
+                          <div className="space-y-2">
+                            <textarea
+                              rows={2}
+                              value={getPhotoPrompt(t, item)}
+                              onChange={(e) =>
+                                setPhotoPrompts((prev) => ({
+                                  ...prev,
+                                  [t.id]: e.target.value,
+                                }))
+                              }
+                              className="w-full max-h-24 resize-none rounded-lg border border-slate-700 bg-slate-900/90 p-2 text-xs text-slate-200"
+                            />
 
                             <div className="flex flex-wrap items-center gap-2">
                               <button
@@ -1727,7 +1789,7 @@ export function StudioModulesWorkspace({
                                 <ImageIcon className="h-3 w-3" />
                                 <span>
                                   {isGeneratingPhotoThis
-                                    ? "Generating Foto..."
+                                    ? "Generating..."
                                     : "Generate Foto"}
                                 </span>
                               </button>
@@ -1752,29 +1814,24 @@ export function StudioModulesWorkspace({
                                 <Send className="h-3 w-3" />
                                 <span>
                                   {isPublishingThis
-                                    ? "Mempublikasikan Foto..."
-                                    : "Posting Format Foto ke FB"}
+                                    ? "Memposting..."
+                                    : "Posting Foto ke FB"}
                                 </span>
                               </button>
                             </div>
 
-                            <div className="space-y-1">
-                              <label className="text-[11px] text-blue-300 font-medium block">
-                                URL Foto / Cover (JPG/PNG publik)
-                              </label>
-                              <input
-                                type="url"
-                                value={item.photoUrl}
-                                onChange={(e) =>
-                                  updatePublishItemState(t.id, item, {
-                                    publishType: "photo",
-                                    photoUrl: e.target.value,
-                                  })
-                                }
-                                placeholder="https://.../storage/v1/object/public/..."
-                                className="w-full rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-xs text-slate-200"
-                              />
-                            </div>
+                            <input
+                              type="url"
+                              value={item.photoUrl}
+                              onChange={(e) =>
+                                updatePublishItemState(t.id, item, {
+                                  publishType: "photo",
+                                  photoUrl: e.target.value,
+                                })
+                              }
+                              placeholder="https://.../storage/v1/object/public/dnaverse-media/..."
+                              className="w-full rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-xs text-slate-200"
+                            />
 
                             {item.photoUrl &&
                               /^https?:\/\//i.test(item.photoUrl) &&
@@ -1783,7 +1840,7 @@ export function StudioModulesWorkspace({
                                   <img
                                     src={item.photoUrl}
                                     alt={t.title}
-                                    className="max-h-56 w-full rounded object-cover"
+                                    className="max-h-48 w-full rounded object-cover"
                                   />
                                 </div>
                               )}
@@ -1791,25 +1848,19 @@ export function StudioModulesWorkspace({
                         )}
 
                         {currentTab === "video" && (
-                          <div className="space-y-2.5">
-                            <div className="space-y-1">
-                              <label className="text-[11px] text-purple-300 font-medium block">
-                                Keluaran Video — URL Video Reels (MP4 publik hasil
-                                render Seedance / Flow)
-                              </label>
-                              <input
-                                type="url"
-                                value={item.videoUrl}
-                                onChange={(e) =>
-                                  updatePublishItemState(t.id, item, {
-                                    publishType: "reels",
-                                    videoUrl: e.target.value,
-                                  })
-                                }
-                                placeholder="https://.../dnaverse-reels.mp4"
-                                className="w-full rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-xs text-slate-200"
-                              />
-                            </div>
+                          <div className="space-y-2">
+                            <input
+                              type="url"
+                              value={item.videoUrl}
+                              onChange={(e) =>
+                                updatePublishItemState(t.id, item, {
+                                  publishType: "reels",
+                                  videoUrl: e.target.value,
+                                })
+                              }
+                              placeholder="https://.../dnaverse-reels.mp4"
+                              className="w-full rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-xs text-slate-200"
+                            />
 
                             <button
                               type="button"
@@ -1831,8 +1882,8 @@ export function StudioModulesWorkspace({
                               <Send className="h-3 w-3" />
                               <span>
                                 {isPublishingThis
-                                  ? "Mempublikasikan Video..."
-                                  : "Posting Format Video ke FB"}
+                                  ? "Memposting..."
+                                  : "Posting Reels ke FB"}
                               </span>
                             </button>
                           </div>
