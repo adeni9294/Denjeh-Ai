@@ -7,6 +7,42 @@ import {
 } from "@/lib/ai/agent-tools";
 import { DbAiModel, DbAiProvider, DbMemory, DbProject } from "@/types/studio";
 
+type TaskDivision = "text" | "photo" | "story" | "reels";
+
+function resolveTaskDivision(params: {
+  agentCode: string;
+  instruction: string;
+  rootCommandTitle: string;
+  estimatedOutput: string;
+}): TaskDivision {
+  const code = params.agentCode.toLowerCase().trim();
+  const text =
+    `${params.instruction} ${params.rootCommandTitle} ${params.estimatedOutput}`.toLowerCase();
+
+  if (
+    code === "video" ||
+    code === "reels" ||
+    /\b(reels|video|film|clip|klip|adegan|detik|scene)\b/.test(text)
+  ) {
+    return "reels";
+  }
+
+  if (code === "story" || /\b(story|teaser)\b/.test(text)) {
+    return "story";
+  }
+
+  if (
+    code === "visual" ||
+    code === "photo" ||
+    code === "character" ||
+    /\b(foto|photo|gambar|image|visual|ilustrasi|poster|banner)\b/.test(text)
+  ) {
+    return "photo";
+  }
+
+  return "text";
+}
+
 export async function POST(
   req: NextRequest,
   context: { params: Promise<{ taskId: string }> }
@@ -78,7 +114,7 @@ export async function POST(
       })
       .eq("id", taskRow.id);
 
-    // 2. Ambil konteks proyek & memori
+    // 2. Ambil konteks proyek & memori (jika ada project_id)
     let projectContext: DbProject | null = null;
     let memories: DbMemory[] = [];
 
@@ -99,6 +135,15 @@ export async function POST(
         )
         .order("importance", { ascending: false })
         .limit(20);
+      memories = (memRows as DbMemory[]) ?? [];
+    } else {
+      const { data: memRows } = await supabase
+        .from("memories")
+        .select("*")
+        .eq("user_id", user.id)
+        .eq("scope", "user")
+        .order("importance", { ascending: false })
+        .limit(10);
       memories = (memRows as DbMemory[]) ?? [];
     }
 
@@ -159,7 +204,7 @@ export async function POST(
 
     const payload = (taskRow.input_payload ?? {}) as Record<string, unknown>;
     const agentCode = String(
-      payload.agentCode || taskRow.agent_code || "story"
+      payload.agentCode || taskRow.agent_code || "idea"
     )
       .toLowerCase()
       .trim();
@@ -170,11 +215,18 @@ export async function POST(
       payload.estimatedOutput || "Artefak Kreatif Terstruktur"
     );
     const toolInstructionBlock = buildAgentToolInstructionBlock(agentCode);
+    const division = resolveTaskDivision({
+      agentCode,
+      instruction,
+      rootCommandTitle,
+      estimatedOutput,
+    });
 
-    const videoMasterPromptTemplate =
-      agentCode === "video"
-        ? `
-KHUSUS VIDEO AGENT — ATURAN WAJIB MASTER PROMPT UTUH PER KLIP:
+    const isVideoFormat = agentCode === "video" || division === "reels";
+
+    const videoMasterPromptTemplate = isVideoFormat
+      ? `
+KHUSUS VIDEO / REELS — ATURAN WAJIB MASTER PROMPT UTUH PER KLIP:
 1. Patuhi durasi setiap klip persis sesuai perintah pengguna (misalnya jika diminta 10s per klip maka setiap klip wajib 10 SECONDS; jika diminta 8s maka 8 SECONDS; jika diminta 15s maka 15 SECONDS). DILARANG mencampur durasi berbeda kecuali diminta.
 2. Buat SATU elemen di array "steps" untuk SETIAP KLIP (stepNumber = nomor klip: 1, 2, 3, dst.).
 3. Pada field "action" di setiap klip, tulis SATU MASTER PROMPT UTUH yang menyatukan cerita/adegan, lokasi, karakter & kostum, rincian aksi per rentang detik, kamera, gaya visual, sound design, dialog, kontinuitas, dan negative prompt dengan struktur blok persis seperti template berikut (dalam bahasa Inggris sinematik agar siap tempel ke video generator):
@@ -233,7 +285,14 @@ STRICT CONTINUITY:
 
 NEGATIVE PROMPT:
 [Daftar larangan visual/animasi/distorsi wajah/perubahan kostum]`
-        : "";
+      : `
+ATURAN FORMAT NON-VIDEO (WAJIB DIPATUHI):
+1. Tugas ini BUKAN skrip/prompt video berdurasi detik kecuali pengguna secara eksplisit meminta video/reels.
+2. JANGAN menulis label durasi detik (0-2s, 15 detik, dll.), pergerakan kamera video, atau template master prompt adegan video.
+3. Sesuaikan format keluaran dengan jenis tugasnya:
+   - Jika tugas teks/ide/artikel/caption: tulis draf teks atau daftar ide yang rapi, jelas, dan langsung siap pakai dalam bahasa Indonesia.
+   - Jika tugas foto/gambar/visual: tulis konsep visual gambar tunggal dan prompt gambar statis (bukan timeline video).
+   - Jika tugas story: tulis konsep/teks singkat yang padat dan menarik.`;
 
     const systemPrompt = `Anda adalah ${agentName} dalam sistem DENJEH AI.
 Hasilkan keluaran nyata, detail, dan siap pakai sesuai tugas agen Anda dalam format JSON murni.
@@ -250,7 +309,7 @@ WAJIB kembalikan JSON valid dengan skema persis seperti ini:
       "stepNumber": 1,
       "agentCode": "${agentCode}",
       "agentName": "${agentName}",
-      "action": "Isi detail / master prompt utuh siap pakai dari hasil kerja agen ini",
+      "action": "Isi detail / hasil kerja agen ini secara lengkap dan siap pakai",
       "dependsOn": "${String(payload.dependsOn || "Previous Steps")}",
       "estimatedOutput": "${estimatedOutput}"
     }
@@ -267,7 +326,7 @@ WAJIB kembalikan JSON valid dengan skema persis seperti ini:
             .join("\n")
         : "- Belum ada memori tersimpan.";
 
-    const userPrompt = `PROYEK: ${projectContext?.name ?? "Tanpa Proyek Khusus"}
+    const userPrompt = `KONTEKS PROYEK: ${projectContext?.name ?? "Tanpa Proyek Khusus (Bebas)"}
 DESKRIPSI PROYEK: ${projectContext?.description ?? "-"}
 INSTRUKSI SISTEM PROYEK: ${projectContext?.system_instructions ?? "-"}
 PERINTAH AWAL PENGGUNA: ${rootCommandTitle || instruction}
@@ -292,26 +351,23 @@ ${estimatedOutput}`;
       preferredModel,
     });
 
-    const formattedStepsText =
-      agentCode === "video"
-        ? result.steps
-            .map(
-              (s) =>
-                `=== CLIP #${String(s.stepNumber).padStart(2, "0")} ===\n${
-                  s.action
-                }`
-            )
-            .join("\n\n----------------------------------------\n\n")
-        : result.steps
-            .map(
-              (s) =>
-                `${s.stepNumber}. [${s.agentName}] ${s.action} (Output: ${s.estimatedOutput})`
-            )
-            .join("\n\n");
+    const formattedStepsText = isVideoFormat
+      ? result.steps
+          .map(
+            (s) =>
+              `=== CLIP #${String(s.stepNumber).padStart(2, "0")} ===\n${
+                s.action
+              }`
+          )
+          .join("\n\n----------------------------------------\n\n")
+      : result.steps
+          .map((s) => `${s.stepNumber}. ${s.action}`)
+          .join("\n\n");
 
     const outputPayload = {
       summary: result.intentSummary || "Tugas selesai diproses.",
       deliverableType: estimatedOutput,
+      division,
       contentMarkdown: formattedStepsText || result.intentSummary,
       steps: result.steps,
       providerUsed: result.providerUsed,
@@ -344,6 +400,7 @@ ${estimatedOutput}`;
           providerUsed: result.providerUsed,
           modelUsed: result.modelUsed,
           agentCode,
+          division,
           allowedTools: agentSpec.allowedTools,
         },
       })
