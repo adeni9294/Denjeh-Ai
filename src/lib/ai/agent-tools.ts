@@ -5,12 +5,10 @@ export type AgentToolId =
   | "draft_text_post"
   | "craft_story_sequence"
   | "design_photo_prompt"
-  | "extract_story_beats"
-  | "validate_character_continuity"
-  | "build_visual_keyframes"
+  | "build_reels_sequence"
   | "split_clip_prompts_per_duration"
   | "generate_social_caption_pack"
-  | "audit_continuity_checklist"
+  | "audit_content_format"
   | "prepare_facebook_page_payload";
 
 export interface AgentToolDefinition {
@@ -80,28 +78,12 @@ export const AGENT_TOOL_REGISTRY: Record<AgentToolId, AgentToolDefinition> = {
       "Merancang konsep gambar tunggal, sudut pandang, pencahayaan, dan prompt gambar statis siap pakai.",
     runtime: "prompt_structurer",
   },
-  extract_story_beats: {
-    id: "extract_story_beats",
-    name: "Extract 3-Act Story Beats",
+  build_reels_sequence: {
+    id: "build_reels_sequence",
+    name: "Build Reels Sequence",
     category: "creative",
     description:
-      "Menyusun struktur alur untuk kebutuhan video/reels sesuai durasi yang diminta.",
-    runtime: "prompt_structurer",
-  },
-  validate_character_continuity: {
-    id: "validate_character_continuity",
-    name: "Validate Character Continuity",
-    category: "memory",
-    description:
-      "Memverifikasi konsistensi identitas subjek, gaya visual, atau karakter lintas item bila diperlukan.",
-    runtime: "prompt_structurer",
-  },
-  build_visual_keyframes: {
-    id: "build_visual_keyframes",
-    name: "Build Visual Keyframes",
-    category: "creative",
-    description:
-      "Menyusun arahan pencahayaan, komposisi, dan detail visual yang konsisten.",
+      "Menyusun alur hook, poin adegan, dan narasi singkat khusus konten Reels/video sesuai durasi yang diminta.",
     runtime: "prompt_structurer",
   },
   split_clip_prompts_per_duration: {
@@ -120,9 +102,9 @@ export const AGENT_TOOL_REGISTRY: Record<AgentToolId, AgentToolDefinition> = {
       "Menyusun hook, caption, tagar, dan saran waktu unggah sesuai format (Teks, Story, Foto, atau Reels).",
     runtime: "prompt_structurer",
   },
-  audit_continuity_checklist: {
-    id: "audit_continuity_checklist",
-    name: "Audit Continuity Checklist",
+  audit_content_format: {
+    id: "audit_content_format",
+    name: "Audit Content Format",
     category: "quality",
     description:
       "Memeriksa kesesuaian hasil dengan jenis konten yang diminta (Teks, Story, Foto, atau Reels) dan memori.",
@@ -158,7 +140,7 @@ export const MULTI_AGENT_SPECIALISTS: AgentSpecialistSpec[] = [
     name: "Text Agent",
     title: "Penulis Konten Teks & Postingan",
     role: "Menyusun postingan teks, edukasi/tips, hook pembuka, dan narasi tulisan tanpa format video.",
-    preferredTier: "Gemini 2.5 Flash (Free)",
+    preferredTier: "Gemini Flash (Free)",
     allowedTools: [
       "read_project_memories",
       "draft_text_post",
@@ -172,7 +154,7 @@ export const MULTI_AGENT_SPECIALISTS: AgentSpecialistSpec[] = [
     name: "Story Agent",
     title: "Kreator Story Singkat & Interaktif",
     role: "Menyusun konsep dan teks singkat untuk Story lengkap dengan ide polling/pertanyaan audiens.",
-    preferredTier: "Gemini 2.5 Flash (Free)",
+    preferredTier: "Gemini Flash (Free)",
     allowedTools: [
       "read_project_memories",
       "craft_story_sequence",
@@ -186,11 +168,11 @@ export const MULTI_AGENT_SPECIALISTS: AgentSpecialistSpec[] = [
     name: "Photo Agent",
     title: "Desainer Konsep & Prompt Foto",
     role: "Menyusun konsep foto tunggal, komposisi, pencahayaan, dan prompt gambar statis.",
-    preferredTier: "Gemini 2.5 Flash (Free)",
+    preferredTier: "Gemini Flash (Free)",
     allowedTools: [
       "read_project_memories",
       "design_photo_prompt",
-      "build_visual_keyframes",
+      "generate_social_caption_pack",
     ],
     defaultPrompt:
       "Buat konsep foto dan prompt gambar statis yang detail beserta komposisi dan pencahayaan yang sesuai.",
@@ -199,11 +181,11 @@ export const MULTI_AGENT_SPECIALISTS: AgentSpecialistSpec[] = [
     code: "reels",
     name: "Reels Agent",
     title: "Kreator Video Pendek & Reels",
-    role: "Khusus konten Reels/Video: menyusun hook cepat, alur adegan, dan master prompt per klip sesuai durasi.",
-    preferredTier: "Gemini 2.5 Flash (Free)",
+    role: "Khusus konten Reels/Video: menyusun hook cepat, alur adegan, dan prompt per klip sesuai durasi.",
+    preferredTier: "Gemini Flash (Free)",
     allowedTools: [
       "read_project_memories",
-      "extract_story_beats",
+      "build_reels_sequence",
       "split_clip_prompts_per_duration",
     ],
     defaultPrompt:
@@ -214,7 +196,7 @@ export const MULTI_AGENT_SPECIALISTS: AgentSpecialistSpec[] = [
     name: "Idea Agent",
     title: "Konseptor Kreatif",
     role: "Mengembangkan ide dan sudut pandang konten untuk berbagai format (teks, story, foto, atau reels).",
-    preferredTier: "Gemini 2.5 Flash (Free)",
+    preferredTier: "Gemini Flash (Free)",
     allowedTools: ["read_project_memories", "save_project_memory"],
     defaultPrompt:
       "Kembangkan 3 variasi ide konten yang relevan dan segar sesuai topik yang diminta.",
@@ -244,8 +226,8 @@ export const MULTI_AGENT_SPECIALISTS: AgentSpecialistSpec[] = [
     name: "Quality Agent",
     title: "Audit Kualitas & Kesesuaian Format",
     role: "Memeriksa apakah hasil sudah sesuai dengan format yang diminta (teks, story, foto, atau reels).",
-    preferredTier: "Gemini 2.5 Flash (Free)",
-    allowedTools: ["read_project_memories", "audit_continuity_checklist"],
+    preferredTier: "Gemini Flash (Free)",
+    allowedTools: ["read_project_memories", "audit_content_format"],
     defaultPrompt:
       "Audit hasil konten agar sesuai dengan format yang diminta, jelas, dan siap dipublikasikan.",
   },
