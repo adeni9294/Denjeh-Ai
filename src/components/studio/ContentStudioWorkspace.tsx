@@ -52,13 +52,33 @@ interface ReadyPublishItem {
 const PUBLISH_TABS: {
   key: ReadyPublishTabKey;
   label: string;
-  outputLabel: string;
-  slotTime: string;
+  outputSummary: string;
+  defaultSlotTime: string;
 }[] = [
-  { key: "story", label: "Story", outputLabel: "Foto / Teks", slotTime: "08.00 WIB" },
-  { key: "photo", label: "Foto", outputLabel: "Foto + Caption & Hashtag", slotTime: "11.00 WIB" },
-  { key: "text", label: "Teks", outputLabel: "Teks Murni (Tanpa Caption/Hashtag)", slotTime: "15.00 WIB" },
-  { key: "reels", label: "Reels", outputLabel: "Video + Caption & Hashtag", slotTime: "19.00 WIB" },
+  {
+    key: "story",
+    label: "Story",
+    outputSummary: "Foto / Teks",
+    defaultSlotTime: "08.00 WIB",
+  },
+  {
+    key: "photo",
+    label: "Foto",
+    outputSummary: "Foto + Caption & Hashtag",
+    defaultSlotTime: "11.00 WIB",
+  },
+  {
+    key: "text",
+    label: "Teks",
+    outputSummary: "Teks Murni",
+    defaultSlotTime: "15.00 WIB",
+  },
+  {
+    key: "reels",
+    label: "Reels",
+    outputSummary: "Video + Caption & Hashtag",
+    defaultSlotTime: "19.00 WIB",
+  },
 ];
 
 function cleanReadableText(raw: string, fallbackTitle: string): string {
@@ -87,7 +107,11 @@ function sanitizePureTextContent(raw: string): string {
 
   const filtered = lines.filter((line) => {
     if (!line) return true;
-    if (/^(caption(\s+slot\s+\w+)?|hashtag(s)?|tagar|rekomendasi\s+jam\s+unggah|call\s*-\s*to\s*-\s*action|cta)\s*:/i.test(line)) {
+    if (
+      /^(caption(\s+slot\s+\w+)?|hashtag(s)?|tagar|rekomendasi\s+jam\s+unggah|call\s*-\s*to\s*-\s*action|cta)\s*:/i.test(
+        line
+      )
+    ) {
       return false;
     }
     const withoutTags = line.replace(/(?:^|\s)#[A-Za-z0-9_]+/g, "").trim();
@@ -293,9 +317,10 @@ function inferPublishChannel(task: TaskWithPayloads): ReadyPublishTabKey {
   return "text";
 }
 
-function getSlotTimeForChannel(channel: ReadyPublishTabKey): string {
+function getDefaultSlotTimeForChannel(channel: ReadyPublishTabKey): string {
   return (
-    PUBLISH_TABS.find((tab) => tab.key === channel)?.slotTime ?? "15.00 WIB"
+    PUBLISH_TABS.find((tab) => tab.key === channel)?.defaultSlotTime ??
+    "15.00 WIB"
   );
 }
 
@@ -307,7 +332,7 @@ function getSlotScheduleLabel(
   if (slotKey === "siang") return "11.00 WIB";
   if (slotKey === "sore") return "15.00 WIB";
   if (slotKey === "malam") return "19.00 WIB";
-  return getSlotTimeForChannel(channel);
+  return getDefaultSlotTimeForChannel(channel);
 }
 
 function buildReadyPublishItems(tasks: TaskWithPayloads[]): ReadyPublishItem[] {
@@ -937,10 +962,10 @@ export function ContentStudioWorkspace() {
           </div>
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-[11px] text-slate-400">
-              Output: {activeTabMeta.outputLabel}
+              Format: {activeTabMeta.outputSummary}
             </span>
             <Badge variant="emerald">
-              Slot {getSlotTimeForChannel(activeTab)}
+              Target {getDefaultSlotTimeForChannel(activeTab)}
             </Badge>
           </div>
         </div>
@@ -1017,9 +1042,13 @@ export function ContentStudioWorkspace() {
                         className="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] text-slate-200"
                       >
                         <option value="story">Tab Story (Foto / Teks)</option>
-                        <option value="photo">Tab Foto (Foto + Caption & Hashtag)</option>
+                        <option value="photo">
+                          Tab Foto (Foto + Caption & Hashtag)
+                        </option>
                         <option value="text">Tab Teks (Teks Murni)</option>
-                        <option value="reels">Tab Reels (Video + Caption & Hashtag)</option>
+                        <option value="reels">
+                          Tab Reels (Video + Caption & Hashtag)
+                        </option>
                       </select>
 
                       <button
