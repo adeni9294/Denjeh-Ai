@@ -12,9 +12,14 @@ jobs:
   trigger-daily-publish:
     runs-on: ubuntu-latest
     steps:
-      - name: Call DENJEH AI Daily Publish Endpoint
+- name: Call DENJEH AI Daily Publish Endpoint
         run: |
-          curl --fail --silent --show-error -X POST \
+          BODY_FILE=$(mktemp)
+          CODE=$(curl -s -o "$BODY_FILE" -w "%{http_code}" -X POST \
             "https://denjeh-ai.adeni9294.workers.dev/api/cron/daily-publish" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            -H "Content-Type: application/json"
+            -H "Content-Type: application/json")
+          echo "HTTP Status: $CODE"
+          cat "$BODY_FILE"
+          echo ""
+          test "$CODE" -ge 200 -a "$CODE" -lt 300
