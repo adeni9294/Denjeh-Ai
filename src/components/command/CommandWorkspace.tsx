@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
@@ -51,12 +51,28 @@ type TaskWithPayloads = DbTask & {
   input_payload?: Record<string, unknown> | null;
   output_payload?: Record<string, unknown> | null;
   progress?: number | null;
+  started_at?: string | null;
+  updated_at?: string | null;
 };
 
 type WorkspaceMode = "chat" | "orchestrator";
 
 const DRAFT_INPUT_KEY = "denjeh_command_draft_input";
 const SELECTED_PROJECT_KEY = "denjeh_command_selected_project";
+const STUCK_THRESHOLD_MS = 3 * 60 * 1000; // 3 menit
+
+function isTaskStuckAtZero(task: TaskWithPayloads, nowMs: number): boolean {
+  if (task.status !== "running") return false;
+  const pct = Number(task.progress ?? 0);
+  if (pct > 0) return false;
+
+  const refTimestamp =
+    task.started_at || task.updated_at || task.created_at || "";
+  const parsedMs = Date.parse(refTimestamp);
+  if (!Number.isFinite(parsedMs)) return false;
+
+  return nowMs - parsedMs >= STUCK_THRESHOLD_MS;
+}
 
 function getPreferredModelForTask(task?: TaskWithPayloads): string | undefined {
   try {
@@ -136,6 +152,7 @@ export function CommandWorkspace() {
   const [approvingRun, setApprovingRun] = useState(false);
   const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
   const [runningChain, setRunningChain] = useState(false);
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
   const [copiedTaskId, setCopiedTaskId] = useState<string | null>(null);
   const [savingMemoryTaskId, setSavingMemoryTaskId] = useState<string | null>(
     null
@@ -147,6 +164,25 @@ export function CommandWorkspace() {
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isLoggedIn, setIsLoggedIn] = useState<boolean | null>(null);
+
+  const autoTriggeredRunsRef = useRef<Set<string>>(new Set());
+  const runningChainRef = useRef(false);
+  const runningTaskRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    runningChainRef.current = runningChain;
+  }, [runningChain]);
+
+  useEffect(() => {
+    runningTaskRef.current = runningTaskId;
+  }, [runningTaskId]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setNowTick(Date.now());
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     try {
@@ -265,6 +301,142 @@ export function CommandWorkspace() {
     }
   }, [searchParams]);
 
+  const executeChainInternal = useCallback(
+    async (targetRunId: string | null, allowStuckRecovery = false) => {
+      if (runningChainRef.current || runningTaskRef.current) return;
+      setRunningChain(true);
+      runningChainRef.current = true;
+      setErrorMsg(null);
+
+      try {
+        const supabase = createSupabaseBrowserClient();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (!user) return;
+
+        let query = supabase
+          .from("tasks")
+          .select("*")
+          .eq("user_id", user.id)
+          .neq("status", "completed");
+
+        if (targetRunId) {
+          query = query.eq("workflow_run_id", targetRunId);
+        } else if (selectedProject) {
+          query = query.eq("project_id", selectedProject);
+        }
+
+        const { data } = await query;
+        const candidateTasks = ((data as TaskWithPayloads[]) ?? []).sort(
+          (a, b) => {
+            const aOrder = Number(
+              (a.input_payload ?? {}).stepOrder ?? a.step_order ?? 0
+            );
+            const bOrder = Number(
+              (b.input_payload ?? {}).stepOrder ?? b.step_order ?? 0
+            );
+            return aOrder - bOrder;
+          }
+        );
+
+        const nowMs = Date.now();
+        const executableTasks = candidateTasks.filter((t) => {
+          if (t.status !== "running") return true;
+          if (allowStuckRecovery && isTaskStuckAtZero(t, nowMs)) return true;
+          return false;
+        });
+
+        for (const task of executableTasks) {
+          setRunningTaskId(task.id);
+          runningTaskRef.current = task.id;
+
+          if (task.status === "running") {
+            await supabase
+              .from("tasks")
+              .update({
+                status: "pending",
+                progress: 0,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", task.id)
+              .eq("user_id", user.id);
+          }
+
+          const preferredModel = getPreferredModelForTask(task);
+          const res = await fetch(`/api/orchestrator/tasks/${task.id}/run`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              preferredModel,
+              freeTopicMode: !selectedProject,
+            }),
+          });
+          const rawText = await res.text();
+          let resultData: { ok?: boolean; error?: string } = {};
+          try {
+            resultData = JSON.parse(rawText) as typeof resultData;
+          } catch {
+            resultData = {
+              ok: false,
+              error: rawText.trim()
+                ? `Respons server (${res.status}): ${rawText.trim().slice(0, 200)}`
+                : `Gagal menjalankan langkah (HTTP ${res.status}).`,
+            };
+          }
+
+          await loadHistoryAndTasks(selectedProject);
+
+          if (!res.ok) {
+            setErrorMsg(
+              resultData.error ??
+                `Gagal menjalankan langkah #${Number(
+                  (task.input_payload ?? {}).stepOrder ?? 1
+                )}: ${task.title}`
+            );
+            break;
+          }
+        }
+      } catch (err) {
+        setErrorMsg(
+          err instanceof Error
+            ? err.message
+            : "Terjadi kesalahan saat menjalankan antrean berantai."
+        );
+      } finally {
+        setRunningTaskId(null);
+        runningTaskRef.current = null;
+        setRunningChain(false);
+        runningChainRef.current = false;
+      }
+    },
+    [selectedProject, loadHistoryAndTasks]
+  );
+
+  // Auto-jalankan antrean berantai otomatis ketika ada run aktif yang sudah disetujui / berjalan
+  useEffect(() => {
+    if (!isLoggedIn || workspaceMode !== "orchestrator" || !activeRunId) return;
+    if (runningChainRef.current || runningTaskRef.current) return;
+    if (autoTriggeredRunsRef.current.has(activeRunId)) return;
+
+    const runObj = historyRuns.find((r) => r.id === activeRunId);
+    const runTasks = (dbTasks as TaskWithPayloads[]).filter(
+      (t) => t.workflow_run_id === activeRunId
+    );
+
+    const isRunApprovedOrActive =
+      runObj?.status === "running" ||
+      runObj?.trigger_mode === "autonomous" ||
+      runTasks.some((t) => t.status === "running" || t.status === "completed");
+
+    const hasPendingStep = runTasks.some((t) => t.status === "pending");
+
+    if (isRunApprovedOrActive && hasPendingStep) {
+      autoTriggeredRunsRef.current.add(activeRunId);
+      void executeChainInternal(activeRunId, false);
+    }
+  }, [isLoggedIn, workspaceMode, activeRunId, historyRuns, dbTasks, executeChainInternal]);
+
   const handleOpenHistoryRun = async (run: DbWorkflowRun) => {
     setActiveRunId(run.id);
     setActiveTab("command");
@@ -305,6 +477,7 @@ export function CommandWorkspace() {
     const isApproved =
       run.status === "running" ||
       run.status === "completed" ||
+      run.trigger_mode === "autonomous" ||
       runTasks.some((t) => t.status === "running" || t.status === "completed");
 
     const restoredMessages: CommandMessage[] = [
@@ -374,6 +547,7 @@ export function CommandWorkspace() {
         return;
       }
 
+      autoTriggeredRunsRef.current.delete(runId);
       if (activeRunId === runId) {
         setActiveRunId(null);
         setMessages([]);
@@ -427,6 +601,8 @@ export function CommandWorkspace() {
     setApprovingRun(true);
     setErrorMsg(null);
 
+    let resolvedRunId: string | null = activeRunId;
+
     try {
       const supabase = createSupabaseBrowserClient();
 
@@ -454,13 +630,17 @@ export function CommandWorkspace() {
         if (sorted.length > 0) {
           await supabase
             .from("tasks")
-            .update({ status: "running", started_at: new Date().toISOString() })
+            .update({
+              status: "running",
+              progress: 0,
+              started_at: new Date().toISOString(),
+            })
             .eq("id", sorted[0].id);
 
           if (sorted.length > 1) {
             await supabase
               .from("tasks")
-              .update({ status: "pending" })
+              .update({ status: "pending", progress: 0 })
               .in(
                 "id",
                 sorted.slice(1).map((t) => t.id)
@@ -499,14 +679,20 @@ export function CommandWorkspace() {
         }
 
         if (data.run?.id) {
+          resolvedRunId = data.run.id;
           setActiveRunId(data.run.id);
         }
+      }
+
+      if (resolvedRunId) {
+        autoTriggeredRunsRef.current.add(resolvedRunId);
       }
 
       setMessages((prev) =>
         prev.map((m) => (m.id === msg.id ? { ...m, approved: true } : m))
       );
       await loadHistoryAndTasks(selectedProject);
+      void executeChainInternal(resolvedRunId, true);
     } catch (err) {
       setErrorMsg(
         err instanceof Error ? err.message : "Gagal menyetujui rencana."
@@ -516,12 +702,30 @@ export function CommandWorkspace() {
     }
   };
 
+  // Fallback klik manual per agen (tetap aktif & bisa mereset langkah stuck di 0%)
   const handleRunTask = async (taskId: string) => {
     if (runningTaskId || runningChain) return;
     setRunningTaskId(taskId);
+    runningTaskRef.current = taskId;
     setErrorMsg(null);
 
     try {
+      const supabase = createSupabaseBrowserClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (user) {
+        await supabase
+          .from("tasks")
+          .update({
+            status: "pending",
+            progress: 0,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", taskId)
+          .eq("user_id", user.id);
+      }
+
       const taskObj = (dbTasks as TaskWithPayloads[]).find(
         (item) => item.id === taskId
       );
@@ -561,92 +765,13 @@ export function CommandWorkspace() {
       );
     } finally {
       setRunningTaskId(null);
+      runningTaskRef.current = null;
     }
   };
 
+  // Fallback klik manual berantai (termasuk recovery langkah stuck > 3 menit)
   const handleRunChain = async () => {
-    if (runningChain || runningTaskId) return;
-    setRunningChain(true);
-    setErrorMsg(null);
-
-    try {
-      const supabase = createSupabaseBrowserClient();
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) return;
-
-      let query = supabase
-        .from("tasks")
-        .select("*")
-        .eq("user_id", user.id)
-        .neq("status", "completed");
-
-      if (activeRunId) {
-        query = query.eq("workflow_run_id", activeRunId);
-      } else if (selectedProject) {
-        query = query.eq("project_id", selectedProject);
-      }
-
-      const { data } = await query;
-      const pendingTasks = ((data as TaskWithPayloads[]) ?? []).sort(
-        (a, b) => {
-          const aOrder = Number(
-            (a.input_payload ?? {}).stepOrder ?? a.step_order ?? 0
-          );
-          const bOrder = Number(
-            (b.input_payload ?? {}).stepOrder ?? b.step_order ?? 0
-          );
-          return aOrder - bOrder;
-        }
-      );
-
-      for (const task of pendingTasks) {
-        setRunningTaskId(task.id);
-        const preferredModel = getPreferredModelForTask(task);
-        const res = await fetch(`/api/orchestrator/tasks/${task.id}/run`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            preferredModel,
-            freeTopicMode: !selectedProject,
-          }),
-        });
-        const rawText = await res.text();
-        let resultData: { ok?: boolean; error?: string } = {};
-        try {
-          resultData = JSON.parse(rawText) as typeof resultData;
-        } catch {
-          resultData = {
-            ok: false,
-            error: rawText.trim()
-              ? `Respons server (${res.status}): ${rawText.trim().slice(0, 200)}`
-              : `Gagal menjalankan langkah (HTTP ${res.status}).`,
-          };
-        }
-
-        await loadHistoryAndTasks(selectedProject);
-
-        if (!res.ok) {
-          setErrorMsg(
-            resultData.error ??
-              `Gagal menjalankan langkah #${Number(
-                (task.input_payload ?? {}).stepOrder ?? 1
-              )}: ${task.title}`
-          );
-          break;
-        }
-      }
-    } catch (err) {
-      setErrorMsg(
-        err instanceof Error
-          ? err.message
-          : "Terjadi kesalahan saat menjalankan antrean berantai."
-      );
-    } finally {
-      setRunningTaskId(null);
-      setRunningChain(false);
-    }
+    await executeChainInternal(activeRunId, true);
   };
 
   const handleCopyTaskOutput = async (
@@ -921,6 +1046,9 @@ export function CommandWorkspace() {
 
       if (data.savedRunId) {
         setActiveRunId(data.savedRunId);
+        if (mode === "autonomous") {
+          autoTriggeredRunsRef.current.add(data.savedRunId);
+        }
       }
 
       const orchestratorMsg: CommandMessage = {
@@ -937,6 +1065,10 @@ export function CommandWorkspace() {
       setMessages((prev) => [...prev, orchestratorMsg]);
       setAttachments([]);
       await loadHistoryAndTasks(selectedProject);
+
+      if (mode === "autonomous") {
+        void executeChainInternal(data.savedRunId ?? null, false);
+      }
     } catch (err) {
       setErrorMsg(
         err instanceof Error ? err.message : "Koneksi ke server gagal."
@@ -1444,7 +1576,7 @@ export function CommandWorkspace() {
                           <div className="pt-1 flex items-center gap-1.5 text-xs text-emerald-500">
                             <CheckCircle2 className="h-4 w-4" />
                             <span>
-                              Rencana disetujui dan siap dijalankan oleh
+                              Rencana disetujui dan berjalan otomatis oleh
                               Multi-Agent System.
                             </span>
                           </div>
@@ -1585,6 +1717,7 @@ export function CommandWorkspace() {
                       payload.instruction ?? t.instruction ?? ""
                     );
                     const isRunningThis = runningTaskId === t.id;
+                    const isStuckZero = isTaskStuckAtZero(t, nowTick);
                     const isCopiedThis = copiedTaskId === t.id;
                     const isSavingMemThis = savingMemoryTaskId === t.id;
                     const isSavedMemThis = Boolean(savedMemoryTaskIds[t.id]);
@@ -1592,7 +1725,11 @@ export function CommandWorkspace() {
                     return (
                       <div
                         key={t.id}
-                        className="rounded-xl border border-slate-200/80 dark:border-studio-border bg-slate-50/70 dark:bg-studio-navy/80 p-3 space-y-2 text-xs"
+                        className={`rounded-xl border p-3 space-y-2 text-xs ${
+                          isStuckZero
+                            ? "border-amber-500/50 bg-amber-500/5"
+                            : "border-slate-200/80 dark:border-studio-border bg-slate-50/70 dark:bg-studio-navy/80"
+                        }`}
                       >
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                           <div>
@@ -1604,6 +1741,8 @@ export function CommandWorkspace() {
                                 variant={
                                   t.status === "completed"
                                     ? "emerald"
+                                    : isStuckZero
+                                    ? "amber"
                                     : t.status === "running"
                                     ? "blue"
                                     : t.status === "failed"
@@ -1611,7 +1750,7 @@ export function CommandWorkspace() {
                                     : "amber"
                                 }
                               >
-                                {t.status}
+                                {isStuckZero ? "stuck >3m (0%)" : t.status}
                               </Badge>
                               <span className="text-[11px] font-normal text-slate-400">
                                 {t.progress ?? 0}%
@@ -1620,6 +1759,13 @@ export function CommandWorkspace() {
                             <p className="mt-0.5 text-slate-600 dark:text-slate-400">
                               {instructionText}
                             </p>
+                            {isStuckZero && (
+                              <p className="mt-1 text-[11px] text-amber-300">
+                                Terdeteksi tertahan di 0% lebih dari 3 menit.
+                                Klik &ldquo;Jalankan Agen&rdquo; untuk
+                                menjalankan ulang secara manual.
+                              </p>
+                            )}
                           </div>
 
                           <div className="flex items-center gap-2 shrink-0 flex-wrap">
@@ -1628,7 +1774,11 @@ export function CommandWorkspace() {
                                 type="button"
                                 disabled={isRunningThis || runningChain}
                                 onClick={() => handleRunTask(t.id)}
-                                className="rounded-lg bg-purple-600/20 border border-purple-500/30 px-2.5 py-1 text-[11px] font-medium text-purple-300 hover:bg-purple-600/30 disabled:opacity-50"
+                                className={`rounded-lg border px-2.5 py-1 text-[11px] font-medium disabled:opacity-50 ${
+                                  isStuckZero
+                                    ? "bg-amber-500/25 border-amber-400/50 text-amber-200 hover:bg-amber-500/35"
+                                    : "bg-purple-600/20 border-purple-500/30 text-purple-300 hover:bg-purple-600/30"
+                                }`}
                               >
                                 {isRunningThis
                                   ? "Menjalankan..."
