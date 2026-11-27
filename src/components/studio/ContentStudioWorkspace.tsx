@@ -13,15 +13,20 @@ import {
   Download,
   BookmarkPlus,
   AlertCircle,
+  CheckCircle2,
   Layers,
   Film,
   FileText,
+  CalendarClock,
 } from "lucide-react";
+
+type CronSlotKind = "story" | "photo" | "text" | "reels";
 
 type TaskWithPayloads = DbTask & {
   workflow_run_id?: string | null;
   input_payload?: Record<string, unknown> | null;
   output_payload?: Record<string, unknown> | null;
+  checkpoint_state?: Record<string, unknown> | null;
   progress?: number | null;
 };
 
@@ -41,7 +46,17 @@ interface PromptCardItem {
   title: string;
   subtitle: string;
   promptText: string;
+  defaultSlotKind: CronSlotKind;
+  defaultCaption: string;
+  checkpointState: Record<string, unknown>;
 }
+
+const SLOT_OPTIONS: { value: CronSlotKind; label: string }[] = [
+  { value: "story", label: "Story (08.00 WIB)" },
+  { value: "photo", label: "Foto (11.00 WIB)" },
+  { value: "text", label: "Teks (15.00 WIB)" },
+  { value: "reels", label: "Reels (19.00 WIB)" },
+];
 
 function getAgentCode(task: TaskWithPayloads): string {
   const payload = (task.input_payload ?? {}) as Record<string, unknown>;
@@ -51,6 +66,30 @@ function getAgentCode(task: TaskWithPayloads): string {
   )
     .toLowerCase()
     .trim();
+}
+
+function inferDefaultSlotKind(
+  task: TaskWithPayloads,
+  isClipMaster: boolean
+): CronSlotKind {
+  const cp = (task.checkpoint_state ?? {}) as Record<string, unknown>;
+  const explicitSlot = String(cp.slotKind ?? "")
+    .toLowerCase()
+    .trim();
+  if (
+    explicitSlot === "story" ||
+    explicitSlot === "photo" ||
+    explicitSlot === "text" ||
+    explicitSlot === "reels"
+  ) {
+    return explicitSlot;
+  }
+
+  const code = getAgentCode(task);
+  if (isClipMaster || code === "video" || code === "reels") return "reels";
+  if (code === "story") return "story";
+  if (code === "photo" || code === "visual") return "photo";
+  return "text";
 }
 
 function extractClipTitle(promptText: string, fallbackIndex: number): string {
@@ -67,6 +106,10 @@ function extractClipTitle(promptText: string, fallbackIndex: number): string {
 function expandTaskToPromptCards(task: TaskWithPayloads): PromptCardItem[] {
   const payload = (task.input_payload ?? {}) as Record<string, unknown>;
   const out = (task.output_payload ?? {}) as Record<string, unknown>;
+  const cp =
+    task.checkpoint_state && typeof task.checkpoint_state === "object"
+      ? (task.checkpoint_state as Record<string, unknown>)
+      : {};
   const stepOrder = Number(payload.stepOrder ?? task.step_order ?? 1);
   const code = getAgentCode(task);
   const agentName = String(payload.agentName || payload.agentCode || "Agent");
@@ -74,10 +117,13 @@ function expandTaskToPromptCards(task: TaskWithPayloads): PromptCardItem[] {
     ? (out.steps as Record<string, unknown>[])
     : [];
 
+  const savedCaption = String(cp.caption ?? "").trim();
+
   if (code === "video" && rawSteps.length > 0) {
     return rawSteps.map((s, idx) => {
       const clipNum = Number(s.stepNumber ?? idx + 1);
       const actionText = String(s.action ?? "").trim();
+      const slotKind = inferDefaultSlotKind(task, true);
       return {
         id: `${task.id}-clip-${clipNum}-${idx}`,
         taskId: task.id,
@@ -90,6 +136,10 @@ function expandTaskToPromptCards(task: TaskWithPayloads): PromptCardItem[] {
         title: extractClipTitle(actionText, clipNum),
         subtitle: String(out.summary ?? task.title),
         promptText: actionText,
+        defaultSlotKind: slotKind,
+        defaultCaption:
+          savedCaption || String(out.summary ?? task.title).trim(),
+        checkpointState: cp,
       };
     });
   }
@@ -101,6 +151,9 @@ function expandTaskToPromptCards(task: TaskWithPayloads): PromptCardItem[] {
       ? `${summary}\n\n${contentMarkdown}`
       : contentMarkdown || summary || task.title;
 
+  const isClip = code === "video";
+  const slotKind = inferDefaultSlotKind(task, isClip);
+
   return [
     {
       id: task.id,
@@ -108,11 +161,14 @@ function expandTaskToPromptCards(task: TaskWithPayloads): PromptCardItem[] {
       projectId: task.project_id ?? null,
       workflowRunId: task.workflow_run_id ?? null,
       stepOrder,
-      isClipMaster: code === "video",
-      badgeLabel: code === "video" ? "Master Prompt Klip" : agentName,
+      isClipMaster: isClip,
+      badgeLabel: isClip ? "Master Prompt Klip" : agentName,
       title: `#${stepOrder} • ${task.title}`,
       subtitle: String(payload.instruction ?? ""),
       promptText: body,
+      defaultSlotKind: slotKind,
+      defaultCaption: savedCaption || summary || task.title,
+      checkpointState: cp,
     },
   ];
 }
@@ -138,12 +194,21 @@ export function ContentStudioWorkspace() {
   const [promptCategory, setPromptCategory] = useState<
     "all" | "clip_master" | "creative_prompt"
   >("clip_master");
+  const [slotSelections, setSlotSelections] = useState<
+    Record<string, CronSlotKind>
+  >({});
+  const [captionDrafts, setCaptionDrafts] = useState<Record<string, string>>(
+    {}
+  );
+  const [savingSlotId, setSavingSlotId] = useState<string | null>(null);
+  const [savedSlotIds, setSavedSlotIds] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [savingMemId, setSavingMemId] = useState<string | null>(null);
   const [savedMemIds, setSavedMemIds] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [isLoggedIn, setIsLoggedIn] = useState<boolean | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [infoMsg, setInfoMsg] = useState<string | null>(null);
 
   const loadStudioData = useCallback(async (projectId: string) => {
     setLoading(true);
@@ -263,7 +328,6 @@ export function ContentStudioWorkspace() {
     }
   }, [selectedProject, isLoggedIn, loadStudioData]);
 
-  // Content Studio hanya menampilkan prompt (mengecualikan agen distribusi/audit)
   const promptOnlyTasks = tasks.filter((t) => {
     const code = getAgentCode(t);
     return !["marketing", "publishing", "quality"].includes(code);
@@ -304,6 +368,69 @@ export function ContentStudioWorkspace() {
       ? `clip-${String(card.clipNumber).padStart(2, "0")}-master-prompt`
       : `step-${card.stepOrder}-prompt`;
     downloadMdFile(`${slug}.md`, `# ${card.title}\n\n${card.promptText}\n`);
+  };
+
+  const handlePrepareForCron = async (card: PromptCardItem) => {
+    if (savingSlotId) return;
+    setSavingSlotId(card.id);
+    setErrorMsg(null);
+    setInfoMsg(null);
+
+    const chosenSlot = slotSelections[card.id] ?? card.defaultSlotKind;
+    const chosenCaption = (
+      captionDrafts[card.id] ?? card.defaultCaption
+    ).trim();
+
+    if (!chosenCaption) {
+      setErrorMsg("Caption tidak boleh kosong sebelum disiapkan untuk cron.");
+      setSavingSlotId(null);
+      return;
+    }
+
+    try {
+      const supabase = createSupabaseBrowserClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const nextCheckpoint = {
+        ...card.checkpointState,
+        slotKind: chosenSlot,
+        caption: chosenCaption,
+        scheduledForCron: true,
+        preparedAt: new Date().toISOString(),
+      };
+
+      const { error } = await supabase
+        .from("tasks")
+        .update({ checkpoint_state: nextCheckpoint })
+        .eq("id", card.taskId)
+        .eq("user_id", user.id);
+
+      if (error) {
+        setErrorMsg(error.message);
+        return;
+      }
+
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === card.taskId ? { ...t, checkpoint_state: nextCheckpoint } : t
+        )
+      );
+      setSavedSlotIds((prev) => ({ ...prev, [card.id]: true }));
+      setInfoMsg(
+        `Slot "${chosenSlot}" & caption siap dieksekusi cron untuk tugas #${card.stepOrder}.`
+      );
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : "Gagal menyiapkan slot cron untuk tugas ini."
+      );
+    } finally {
+      setSavingSlotId(null);
+    }
   };
 
   const handleSaveToMemory = async (card: PromptCardItem) => {
@@ -386,7 +513,13 @@ export function ContentStudioWorkspace() {
         </div>
       )}
 
-      {/* Filter Bar */}
+      {infoMsg && (
+        <div className="flex items-start gap-2.5 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-xs text-emerald-300">
+          <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
+          <p>{infoMsg}</p>
+        </div>
+      )}
+
       <div className="glass-panel rounded-2xl p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2.5">
           <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500 dark:text-slate-400">
@@ -487,7 +620,6 @@ export function ContentStudioWorkspace() {
         </div>
       </div>
 
-      {/* Ringkasan */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div className="glass-panel rounded-2xl p-4">
           <div className="flex items-center gap-2 text-xs text-slate-400">
@@ -514,7 +646,6 @@ export function ContentStudioWorkspace() {
         </div>
       </div>
 
-      {/* Katalog Master Prompt Utuh */}
       <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <div className="flex items-center gap-2">
@@ -546,6 +677,13 @@ export function ContentStudioWorkspace() {
               const isCopied = copiedId === card.id;
               const isSaving = savingMemId === card.id;
               const isSaved = Boolean(savedMemIds[card.id]);
+              const isSavingSlot = savingSlotId === card.id;
+              const isSlotPrepared =
+                Boolean(savedSlotIds[card.id]) ||
+                Boolean(card.checkpointState.scheduledForCron);
+              const currentSlot = slotSelections[card.id] ?? card.defaultSlotKind;
+              const currentCaption =
+                captionDrafts[card.id] ?? card.defaultCaption;
 
               return (
                 <div
@@ -559,6 +697,11 @@ export function ContentStudioWorkspace() {
                         <Badge variant={card.isClipMaster ? "purple" : "blue"}>
                           {card.badgeLabel}
                         </Badge>
+                        {isSlotPrepared && (
+                          <Badge variant="emerald">
+                            Slot: {currentSlot}
+                          </Badge>
+                        )}
                       </div>
                       {card.subtitle && (
                         <p className="text-[11px] text-slate-400">
@@ -614,6 +757,63 @@ export function ContentStudioWorkspace() {
                   <pre className="rounded-xl border border-slate-700/50 bg-slate-950/75 p-3.5 whitespace-pre-wrap font-mono text-[11px] text-slate-200 leading-relaxed overflow-x-auto">
                     {card.promptText}
                   </pre>
+
+                  <div className="rounded-xl border border-slate-700/60 bg-slate-900/70 p-3 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <CalendarClock className="h-3.5 w-3.5 text-emerald-400" />
+                        <span className="text-[11px] font-medium text-slate-200">
+                          Siapkan ke Jadwal Cron:
+                        </span>
+                        <select
+                          value={currentSlot}
+                          onChange={(e) =>
+                            setSlotSelections((prev) => ({
+                              ...prev,
+                              [card.id]: e.target.value as CronSlotKind,
+                            }))
+                          }
+                          aria-label={`Pilih slot cron untuk ${card.title}`}
+                          className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1 text-[11px] text-slate-100"
+                        >
+                          {SLOT_OPTIONS.map((opt) => (
+                            <option key={opt.value} value={opt.value}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <button
+                        type="button"
+                        disabled={isSavingSlot}
+                        onClick={() => void handlePrepareForCron(card)}
+                        className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
+                      >
+                        <CalendarClock className="h-3 w-3" />
+                        <span>
+                          {isSavingSlot
+                            ? "Menyiapkan..."
+                            : isSlotPrepared
+                            ? "Perbarui Slot Cron"
+                            : "Siapkan ke Jadwal Cron"}
+                        </span>
+                      </button>
+                    </div>
+
+                    <input
+                      type="text"
+                      value={currentCaption}
+                      onChange={(e) =>
+                        setCaptionDrafts((prev) => ({
+                          ...prev,
+                          [card.id]: e.target.value,
+                        }))
+                      }
+                      placeholder="Caption final yang akan dikirim oleh cron ke Facebook Page..."
+                      className="w-full rounded-lg border border-slate-700 bg-slate-950/90 px-3 py-1.5 text-[11px] text-slate-200"
+                    />
+                  </div>
                 </div>
               );
             })}
