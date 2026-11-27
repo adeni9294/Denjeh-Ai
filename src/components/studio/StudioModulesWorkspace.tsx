@@ -51,6 +51,7 @@ export interface DailyScheduleSlot {
   title: string;
   caption: string;
   mediaUrl?: string;
+  isReadyToPublish: boolean;
   status: DailySlotCheckStatus;
   statusNote?: string;
   lastRunAt?: string;
@@ -95,6 +96,8 @@ interface AgentModelPrefs {
   perAgent: Record<string, string>;
 }
 
+type SlotPeriodKey = "pagi" | "siang" | "sore" | "malam";
+
 const STORAGE_KEY = "denjeh_agent_model_prefs";
 
 const FALLBACK_MODEL_OPTIONS = [
@@ -126,19 +129,6 @@ function formatDateLabelWib(date: Date = new Date()): string {
     month: "short",
     year: "numeric",
   }).format(date);
-}
-
-function getCurrentWibMinutes(date: Date = new Date()): number {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Asia/Jakarta",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).formatToParts(date);
-
-  const hour = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
-  const minute = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
-  return hour * 60 + minute;
 }
 
 function sanitizeCaptionText(raw: string, fallbackTitle: string): string {
@@ -247,30 +237,73 @@ function inferTaskDivision(
   }
 
   const raw = `${t.title ?? ""} ${String(out.summary ?? "")}`.toLowerCase();
-  if (
-    raw.includes("reels") ||
-    raw.includes("video") ||
-    raw.includes("malam")
-  ) {
+  if (raw.includes("reels") || raw.includes("video")) {
     return "reels";
   }
-  if (
-    raw.includes("story") ||
-    raw.includes("teaser") ||
-    raw.includes("pagi")
-  ) {
+  if (raw.includes("story") || raw.includes("teaser")) {
     return "story";
   }
   if (
     raw.includes("foto") ||
     raw.includes("photo") ||
     raw.includes("gambar") ||
-    raw.includes("visual") ||
-    raw.includes("siang")
+    raw.includes("visual")
   ) {
     return "photo";
   }
   return "text";
+}
+
+function detectTaskSlotInfo(
+  t: TaskWithPayloads,
+  kind: DailySlotKind
+): { period: SlotPeriodKey; timeLabel: string; slotLabel: string } {
+  const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
+  const out = (t.output_payload ?? {}) as Record<string, unknown>;
+  const payload = (t.input_payload ?? {}) as Record<string, unknown>;
+  const hint = `${t.title ?? ""} ${String(cp.slotLabel ?? "")} ${String(
+    payload.slot ?? ""
+  )} ${String(out.summary ?? "")}`.toLowerCase();
+
+  if (hint.includes("19.00") || hint.includes("19:00") || hint.includes("malam")) {
+    return {
+      period: "malam",
+      timeLabel: "19.00",
+      slotLabel: "Slot Malam",
+    };
+  }
+  if (hint.includes("15.00") || hint.includes("15:00") || hint.includes("sore")) {
+    return {
+      period: "sore",
+      timeLabel: "15.00",
+      slotLabel: "Slot Sore",
+    };
+  }
+  if (hint.includes("11.00") || hint.includes("11:00") || hint.includes("siang")) {
+    return {
+      period: "siang",
+      timeLabel: "11.00",
+      slotLabel: "Slot Siang",
+    };
+  }
+  if (hint.includes("08.00") || hint.includes("08:00") || hint.includes("pagi")) {
+    return {
+      period: "pagi",
+      timeLabel: "08.00",
+      slotLabel: "Slot Pagi",
+    };
+  }
+
+  if (kind === "story") {
+    return { period: "pagi", timeLabel: "08.00", slotLabel: "Slot Pagi" };
+  }
+  if (kind === "photo") {
+    return { period: "siang", timeLabel: "11.00", slotLabel: "Slot Siang" };
+  }
+  if (kind === "reels") {
+    return { period: "malam", timeLabel: "19.00", slotLabel: "Slot Malam" };
+  }
+  return { period: "sore", timeLabel: "15.00", slotLabel: "Slot Sore" };
 }
 
 function extractFbPostId(t: TaskWithPayloads): string {
@@ -421,6 +454,12 @@ export function StudioModulesWorkspace({
   const [divisionFilter, setDivisionFilter] =
     useState<DivisionFilterKey>("all");
   const [showAllPublished, setShowAllPublished] = useState(false);
+  const [expandedSlotIds, setExpandedSlotIds] = useState<
+    Record<string, boolean>
+  >({});
+  const [expandedTaskIds, setExpandedTaskIds] = useState<
+    Record<string, boolean>
+  >({});
   const [fbPageId, setFbPageId] = useState("");
   const [fbAccessToken, setFbAccessToken] = useState("");
   const [hasSavedFbCreds, setHasSavedFbCreds] = useState(false);
@@ -678,7 +717,6 @@ export function StudioModulesWorkspace({
   };
 
   const dailySlots = useMemo<DailyScheduleSlot[]>(() => {
-    const currentWibMinutes = getCurrentWibMinutes(new Date());
     const todayTasks = tasks.filter((t) => {
       const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
       const refDate = cp.publishedAt
@@ -691,51 +729,52 @@ export function StudioModulesWorkspace({
       return [];
     }
 
-    const slotMetaMap: Record<
-      DailySlotKind,
-      { timeLabel: string; title: string; defaultCaption: string }
-    > = {
-      story: {
-        timeLabel: "08.00",
-        title: "Slot Pagi — Story Singkat",
-        defaultCaption: "Jadwal otomatis pukul 08.00 WIB.",
-      },
-      photo: {
-        timeLabel: "11.00",
-        title: "Slot Siang — Konten Foto / Visual",
-        defaultCaption: "Jadwal otomatis pukul 11.00 WIB.",
-      },
-      text: {
-        timeLabel: "15.00",
-        title: "Slot Sore — Postingan Teks / Edukasi",
-        defaultCaption: "Jadwal otomatis pukul 15.00 WIB.",
-      },
-      reels: {
-        timeLabel: "19.00",
-        title: "Slot Malam — Video / Reels",
-        defaultCaption: "Jadwal otomatis pukul 19.00 WIB.",
-      },
+    const periodRank: Record<SlotPeriodKey, number> = {
+      pagi: 1,
+      siang: 2,
+      sore: 3,
+      malam: 4,
     };
 
-    const groupedByKind = new Map<DailySlotKind, TaskWithPayloads>();
+    const groupedBySlot = new Map<string, TaskWithPayloads>();
+
     for (const t of todayTasks) {
+      const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
+      const out = (t.output_payload ?? {}) as Record<string, unknown>;
       const kind = inferTaskDivision(t);
-      if (!groupedByKind.has(kind)) {
-        groupedByKind.set(kind, t);
+      const slotInfo = detectTaskSlotInfo(t, kind);
+      const rawContent = String(
+        cp.caption || out.contentMarkdown || out.summary || ""
+      ).trim();
+      const mediaUrl = String(cp.photoUrl ?? cp.videoUrl ?? "").trim();
+
+      if (!rawContent && !mediaUrl) {
+        continue;
+      }
+
+      const slotKey = `${slotInfo.timeLabel}-${kind}`;
+      const existing = groupedBySlot.get(slotKey);
+      if (!existing) {
+        groupedBySlot.set(slotKey, t);
+      } else {
+        const existingCp = (existing.checkpoint_state ?? {}) as Record<
+          string,
+          unknown
+        >;
+        const existingReady = Boolean(
+          existingCp.readyToPublish || existingCp.scheduledForCron
+        );
+        const currentReady = Boolean(cp.readyToPublish || cp.scheduledForCron);
+        if (currentReady && !existingReady) {
+          groupedBySlot.set(slotKey, t);
+        }
       }
     }
 
-    const orderedKinds: DailySlotKind[] = ["story", "photo", "text", "reels"];
-
-    return orderedKinds
-      .filter((kind) => groupedByKind.has(kind))
-      .map((kind) => {
-        const matchedTask = groupedByKind.get(kind)!;
-        const meta = slotMetaMap[kind];
-        const [slotH, slotM] = meta.timeLabel.split(".").map((n) => Number(n));
-        const slotMinutes = (slotH || 0) * 60 + (slotM || 0);
-        const isPastSlot = currentWibMinutes > slotMinutes;
-
+    return Array.from(groupedBySlot.values())
+      .map((matchedTask) => {
+        const kind = inferTaskDivision(matchedTask);
+        const slotInfo = detectTaskSlotInfo(matchedTask, kind);
         const cp = (matchedTask.checkpoint_state ?? {}) as Record<
           string,
           unknown
@@ -744,6 +783,9 @@ export function StudioModulesWorkspace({
           string,
           unknown
         >;
+        const isReadyToPublish = Boolean(
+          cp.readyToPublish || cp.scheduledForCron
+        );
         const fbId = extractFbPostId(matchedTask);
         const publishStatus = String(
           cp.publishStatus ?? out.publishStatus ?? ""
@@ -751,17 +793,20 @@ export function StudioModulesWorkspace({
         const publishError = String(
           cp.publishError ?? out.publishError ?? ""
         ).trim();
+
         const rawContent = String(
-          cp.caption || out.contentMarkdown || out.summary || meta.defaultCaption
+          cp.caption || out.contentMarkdown || out.summary || matchedTask.title
         ).trim();
         const contentPreview = formatPlannerContentByKind(
           kind,
           rawContent,
-          meta.defaultCaption
+          matchedTask.title
         );
 
         let status: DailySlotCheckStatus = "pending";
-        let statusNote: string | undefined;
+        let statusNote: string | undefined = isReadyToPublish
+          ? "Siap Publish sesuai jadwal"
+          : "Draf belum ditandai Siap Publish";
         let lastRunAt: string | undefined;
 
         if (fbId || publishStatus === "published") {
@@ -780,25 +825,26 @@ export function StudioModulesWorkspace({
         } else if (publishStatus === "failed" || publishError) {
           status = "failed";
           statusNote = publishError || "Gagal posting";
-        } else if (isPastSlot) {
-          status = "failed";
-          statusNote = "Terlewat jadwal otomatis";
         }
 
         return {
-          id: `slot-${todayDateCode}-${meta.timeLabel.replace(".", "")}-${kind}`,
+          id: `slot-${todayDateCode}-${slotInfo.timeLabel.replace(".", "")}-${kind}-${matchedTask.id}`,
           dateCode: todayDateCode,
           dateLabel: todayDateLabel,
-          timeLabel: meta.timeLabel,
+          timeLabel: slotInfo.timeLabel,
           kind,
-          title: meta.title,
+          title: `${slotInfo.slotLabel} • ${formatDivisionLabel(kind)}`,
           caption: contentPreview,
           mediaUrl: String(cp.photoUrl ?? cp.videoUrl ?? "").trim(),
+          isReadyToPublish,
           status,
           statusNote,
           lastRunAt,
+          _period: slotInfo.period,
         };
-      });
+      })
+      .sort((a, b) => periodRank[a._period] - periodRank[b._period])
+      .map(({ _period: _unused, ...slot }) => slot);
   }, [tasks, todayDateCode, todayDateLabel]);
 
   const workflowMasterPrompts = useMemo<WorkflowMasterPromptItem[]>(() => {
@@ -1204,12 +1250,36 @@ export function StudioModulesWorkspace({
                   Jadwal Posting Harian Otomatis ({todayDateLabel})
                 </h2>
                 <p className="text-xs text-slate-400">
-                  Disusun otomatis dari tugas aktif sesuai jadwal WIB; centang
-                  hijau (✓) bila sukses tayang dan silang merah (✕) bila gagal /
-                  terlewat.
+                  Klik baris jadwal untuk membuka atau menutup detail isi konten.
                 </p>
               </div>
-              <Badge variant="blue">Auto-Schedule WIB</Badge>
+              <div className="flex items-center gap-2 flex-wrap">
+                {dailySlots.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const allExpanded = dailySlots.every(
+                        (s) => Boolean(expandedSlotIds[s.id])
+                      );
+                      if (allExpanded) {
+                        setExpandedSlotIds({});
+                      } else {
+                        const next: Record<string, boolean> = {};
+                        for (const s of dailySlots) {
+                          next[s.id] = true;
+                        }
+                        setExpandedSlotIds(next);
+                      }
+                    }}
+                    className="rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-700"
+                  >
+                    {dailySlots.every((s) => Boolean(expandedSlotIds[s.id]))
+                      ? "Tutup Semua"
+                      : "Buka Semua"}
+                  </button>
+                )}
+                <Badge variant="blue">Auto-Schedule WIB</Badge>
+              </div>
             </div>
 
             {dailySlots.length === 0 ? (
@@ -1219,73 +1289,146 @@ export function StudioModulesWorkspace({
               </p>
             ) : (
               <div className="space-y-2">
-                {dailySlots.map((slot) => (
-                  <div
-                    key={slot.id}
-                    className="rounded-xl border border-slate-700/60 bg-slate-900/70 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
-                  >
-                    <div className="space-y-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="rounded bg-slate-800 px-2 py-0.5 font-mono text-[11px] text-blue-300">
-                          {slot.dateLabel} • {slot.timeLabel} WIB
-                        </span>
-                        <span className="font-semibold text-slate-100">
-                          {slot.title}
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-slate-400 whitespace-pre-line">
-                        {slot.caption}
-                      </p>
-                      {slot.mediaUrl &&
-                        /^https?:\/\//i.test(slot.mediaUrl) &&
-                        !slot.mediaUrl.includes("...") && (
-                          <p className="text-[10px] text-indigo-300 truncate">
-                            Media: {slot.mediaUrl}
-                          </p>
-                        )}
-                    </div>
+                {dailySlots.map((slot) => {
+                  const isExpanded = Boolean(expandedSlotIds[slot.id]);
+                  const previewLine =
+                    slot.caption
+                      .split("\n")
+                      .map((line) => line.trim())
+                      .find((line) => line.length > 0) ?? "";
 
-                    <div className="flex items-center gap-2 shrink-0 flex-wrap">
-                      {slot.status === "success" ? (
-                        <span className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
-                          <Check className="h-3.5 w-3.5" />
-                          <span>
-                            {slot.statusNote || "Sukses posting"}
-                            {slot.lastRunAt ? ` (${slot.lastRunAt})` : ""}
+                  return (
+                    <div
+                      key={slot.id}
+                      className="rounded-xl border border-slate-700/60 bg-slate-900/70 p-3 space-y-2.5 text-xs transition"
+                    >
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedSlotIds((prev) => ({
+                            ...prev,
+                            [slot.id]: !prev[slot.id],
+                          }))
+                        }
+                        aria-expanded={isExpanded}
+                        className="w-full flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-left"
+                      >
+                        <div className="space-y-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="rounded bg-slate-800 px-2 py-0.5 font-mono text-[11px] text-blue-300">
+                              {slot.dateLabel} • {slot.timeLabel} WIB
+                            </span>
+                            <span className="font-semibold text-slate-100">
+                              {slot.title}
+                            </span>
+                            <Badge
+                              variant={
+                                slot.isReadyToPublish ? "emerald" : "amber"
+                              }
+                            >
+                              {slot.isReadyToPublish
+                                ? "Siap Publish"
+                                : "Belum Siap Publish"}
+                            </Badge>
+                          </div>
+
+                          {!isExpanded && previewLine && (
+                            <p className="text-[11px] text-slate-400 truncate">
+                              {previewLine}
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                          {slot.status === "success" ? (
+                            <span className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
+                              <Check className="h-3.5 w-3.5" />
+                              <span>
+                                {slot.statusNote || "Sukses posting"}
+                                {slot.lastRunAt ? ` (${slot.lastRunAt})` : ""}
+                              </span>
+                            </span>
+                          ) : slot.status === "failed" ? (
+                            <span className="inline-flex items-center gap-1 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2.5 py-1 text-[11px] font-semibold text-rose-300">
+                              <X className="h-3.5 w-3.5" />
+                              <span>
+                                {slot.statusNote
+                                  ? `Gagal posting: ${slot.statusNote}`
+                                  : "Gagal posting"}
+                                {slot.lastRunAt ? ` (${slot.lastRunAt})` : ""}
+                              </span>
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] font-medium text-amber-300">
+                              <Clock className="h-3 w-3" />
+                              <span>
+                                {slot.statusNote || "Menunggu Jadwal"}
+                              </span>
+                            </span>
+                          )}
+
+                          <span className="rounded-lg border border-slate-700 bg-slate-800/80 px-2 py-1 text-[11px] font-medium text-slate-300">
+                            {isExpanded ? "Tutup ▲" : "Detail ▼"}
                           </span>
-                        </span>
-                      ) : slot.status === "failed" ? (
-                        <span className="inline-flex items-center gap-1 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2.5 py-1 text-[11px] font-semibold text-rose-300">
-                          <X className="h-3.5 w-3.5" />
-                          <span>
-                            {slot.statusNote
-                              ? `Gagal posting: ${slot.statusNote}`
-                              : "Gagal posting"}
-                            {slot.lastRunAt ? ` (${slot.lastRunAt})` : ""}
-                          </span>
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] font-medium text-amber-300">
-                          <Clock className="h-3 w-3" />
-                          <span>Menunggu Jadwal</span>
-                        </span>
+                        </div>
+                      </button>
+
+                      {isExpanded && (
+                        <div className="border-t border-slate-800 pt-2.5 space-y-2">
+                          <p className="text-[11px] text-slate-300 whitespace-pre-line leading-relaxed">
+                            {slot.caption}
+                          </p>
+                          {slot.mediaUrl &&
+                            /^https?:\/\//i.test(slot.mediaUrl) &&
+                            !slot.mediaUrl.includes("...") && (
+                              <p className="text-[10px] text-indigo-300 break-all">
+                                Media: {slot.mediaUrl}
+                              </p>
+                            )}
+                        </div>
                       )}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
 
           <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <CalendarDays className="h-5 w-5 text-emerald-400" />
                 <h2 className="text-base font-semibold">
                   Content Planner & Jadwal Produksi ({tasks.length} Item)
                 </h2>
               </div>
-              <Badge variant="emerald">Terhubung ke Tasks</Badge>
+              <div className="flex items-center gap-2 flex-wrap">
+                {tasks.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const allExpanded = tasks.every((t) =>
+                        Boolean(expandedTaskIds[t.id])
+                      );
+                      if (allExpanded) {
+                        setExpandedTaskIds({});
+                      } else {
+                        const next: Record<string, boolean> = {};
+                        for (const t of tasks) {
+                          next[t.id] = true;
+                        }
+                        setExpandedTaskIds(next);
+                      }
+                    }}
+                    className="rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-700"
+                  >
+                    {tasks.every((t) => Boolean(expandedTaskIds[t.id]))
+                      ? "Tutup Semua"
+                      : "Buka Semua"}
+                  </button>
+                )}
+                <Badge variant="emerald">Terhubung ke Tasks</Badge>
+              </div>
             </div>
 
             {tasks.length === 0 ? (
@@ -1299,42 +1442,91 @@ export function StudioModulesWorkspace({
                     string,
                     unknown
                   >;
+                  const cp = (t.checkpoint_state ?? {}) as Record<
+                    string,
+                    unknown
+                  >;
+                  const out = (t.output_payload ?? {}) as Record<
+                    string,
+                    unknown
+                  >;
                   const stepOrder = Number(
                     payload.stepOrder ?? t.step_order ?? 1
                   );
                   const isPublished = isPublishedToFacebook(t);
+                  const isReady = Boolean(
+                    cp.readyToPublish || cp.scheduledForCron
+                  );
+                  const isExpanded = Boolean(expandedTaskIds[t.id]);
+                  const taskDetailText = sanitizeCaptionText(
+                    String(
+                      cp.caption ||
+                        out.contentMarkdown ||
+                        out.summary ||
+                        payload.instruction ||
+                        t.title
+                    ).trim(),
+                    t.title
+                  );
+
                   return (
                     <div
                       key={t.id}
-                      className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
+                      className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-3 space-y-2 text-xs"
                     >
-                      <div>
-                        <p className="font-semibold">
-                          #{stepOrder} • {t.title}
-                        </p>
-                        <p className="text-[11px] text-slate-400">
-                          Target:{" "}
-                          {String(payload.estimatedOutput || "Artefak")} •
-                          Dibuat:{" "}
-                          {new Date(t.created_at).toLocaleDateString("id-ID", {
-                            day: "2-digit",
-                            month: "short",
-                            year: "numeric",
-                          })}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        {isPublished && (
-                          <Badge variant="blue">Sudah Tayang FB</Badge>
-                        )}
-                        <Badge
-                          variant={
-                            t.status === "completed" ? "emerald" : "amber"
-                          }
-                        >
-                          {t.status}
-                        </Badge>
-                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedTaskIds((prev) => ({
+                            ...prev,
+                            [t.id]: !prev[t.id],
+                          }))
+                        }
+                        aria-expanded={isExpanded}
+                        className="w-full flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-left"
+                      >
+                        <div className="min-w-0">
+                          <p className="font-semibold">
+                            #{stepOrder} • {t.title}
+                          </p>
+                          <p className="text-[11px] text-slate-400">
+                            Target:{" "}
+                            {String(payload.estimatedOutput || "Artefak")} •
+                            Dibuat:{" "}
+                            {new Date(t.created_at).toLocaleDateString("id-ID", {
+                              day: "2-digit",
+                              month: "short",
+                              year: "numeric",
+                            })}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1.5 flex-wrap shrink-0">
+                          {isReady && (
+                            <Badge variant="emerald">Siap Publish</Badge>
+                          )}
+                          {isPublished && (
+                            <Badge variant="blue">Sudah Tayang FB</Badge>
+                          )}
+                          <Badge
+                            variant={
+                              t.status === "completed" ? "emerald" : "amber"
+                            }
+                          >
+                            {t.status}
+                          </Badge>
+                          <span className="rounded-lg border border-slate-700 bg-slate-800/80 px-2 py-1 text-[11px] font-medium text-slate-300">
+                            {isExpanded ? "Tutup ▲" : "Detail ▼"}
+                          </span>
+                        </div>
+                      </button>
+
+                      {isExpanded && (
+                        <div className="border-t border-slate-800 pt-2">
+                          <p className="text-[11px] text-slate-300 whitespace-pre-line leading-relaxed">
+                            {taskDetailText}
+                          </p>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
