@@ -5,9 +5,22 @@ import {
   buildAgentToolInstructionBlock,
   getAgentSpec,
 } from "@/lib/ai/agent-tools";
-import { DbAiModel, DbAiProvider, DbMemory, DbProject } from "@/types/studio";
+import { getGeminiKey, getServerEnv } from "@/lib/getEnv";
+import {
+  DbAiModel,
+  DbAiProvider,
+  DbMemory,
+  DbProject,
+} from "@/types/studio";
 
 type TaskDivision = "text" | "photo" | "story" | "reels";
+
+interface WorkersAiBinding {
+  run: (
+    model: string,
+    input: Record<string, unknown>
+  ) => Promise<unknown>;
+}
 
 function resolveTaskDivision(params: {
   agentCode: string;
@@ -34,6 +47,7 @@ function resolveTaskDivision(params: {
   if (
     code === "visual" ||
     code === "photo" ||
+    code === "image" ||
     code === "character" ||
     /\b(foto|photo|gambar|image|visual|ilustrasi|poster|banner)\b/.test(text)
   ) {
@@ -41,6 +55,304 @@ function resolveTaskDivision(params: {
   }
 
   return "text";
+}
+
+function decodeStoredKey(encoded: string | null | undefined): string | null {
+  if (!encoded) return null;
+  const trimmed = encoded.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith("enc_v1:")) {
+    try {
+      return Buffer.from(trimmed.slice(7), "base64").toString("utf-8").trim();
+    } catch {
+      return null;
+    }
+  }
+  return trimmed;
+}
+
+async function resolveGeminiKey(providers: DbAiProvider[]): Promise<string> {
+  const fromEnv = await getGeminiKey();
+  if (fromEnv) return fromEnv;
+
+  for (const p of providers) {
+    const row = p as unknown as Record<string, unknown>;
+    const pKey = String(
+      row.provider_key ?? row.provider_name ?? row.name ?? ""
+    ).toLowerCase();
+    const isGemini =
+      pKey.includes("gemini") ||
+      pKey.includes("google") ||
+      String(row.base_url ?? "").includes("generativelanguage.googleapis.com");
+    if (!isGemini) continue;
+
+    const decoded = decodeStoredKey(
+      String(row.encrypted_api_key ?? row.api_key ?? "")
+    );
+    if (decoded) return decoded;
+  }
+
+  return "";
+}
+
+async function resolveWorkersAiBinding(): Promise<WorkersAiBinding | null> {
+  const env = await getServerEnv();
+  const candidate = (env as Record<string, unknown>).AI;
+  if (
+    candidate &&
+    typeof candidate === "object" &&
+    typeof (candidate as WorkersAiBinding).run === "function"
+  ) {
+    return candidate as WorkersAiBinding;
+  }
+  return null;
+}
+
+function buildCompactPrompt(rawPrompt: string): string {
+  return rawPrompt
+    .replace(/\s+/g, " ")
+    .replace(/===.*?===/g, " ")
+    .trim()
+    .slice(0, 600);
+}
+
+async function translatePromptToEnglishForImage(
+  apiKey: string,
+  rawPrompt: string
+): Promise<string> {
+  const cleanedSource = buildCompactPrompt(rawPrompt);
+  if (!apiKey) return cleanedSource;
+
+  const textModels = [
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+  ];
+
+  const instruction =
+    "Translate and refine the following creative image prompt into a vivid, concise English image-generation prompt (max 110 words). Keep subject, appearance, costume, lighting, setting, composition, and mood clear. Output ONLY the English prompt without quotes or explanations.";
+
+  for (const model of textModels) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
+        apiKey
+      )}`;
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: instruction }] },
+          contents: [{ role: "user", parts: [{ text: cleanedSource }] }],
+          generationConfig: { temperature: 0.3 },
+        }),
+      });
+
+      if (!res.ok) continue;
+
+      const data = (await res.json()) as {
+        candidates?: Array<{
+          content?: { parts?: Array<{ text?: string }> };
+        }>;
+      };
+
+      const translated = data.candidates?.[0]?.content?.parts
+        ?.map((pt) => pt.text ?? "")
+        .join("")
+        .replace(/^["']|["']$/g, "")
+        .trim();
+
+      if (translated && translated.length >= 10) {
+        return translated.slice(0, 600);
+      }
+    } catch {
+      // Lanjut ke fallback prompt ringkas
+    }
+  }
+
+  return cleanedSource;
+}
+
+function extractImageBufferFromWorkersAi(rawOutput: unknown): Buffer | null {
+  if (!rawOutput) return null;
+
+  if (rawOutput instanceof Uint8Array || rawOutput instanceof ArrayBuffer) {
+    return Buffer.from(rawOutput as ArrayBuffer);
+  }
+
+  if (Array.isArray(rawOutput)) {
+    return Buffer.from(rawOutput);
+  }
+
+  if (typeof rawOutput === "object") {
+    const obj = rawOutput as Record<string, unknown>;
+    if (typeof obj.image === "string" && obj.image.trim().length > 0) {
+      return Buffer.from(obj.image.trim(), "base64");
+    }
+    if (obj.image instanceof Uint8Array || obj.image instanceof ArrayBuffer) {
+      return Buffer.from(obj.image as ArrayBuffer);
+    }
+  }
+
+  return null;
+}
+
+async function generateAndUploadPhotoAsset(params: {
+  supabase: NonNullable<Awaited<ReturnType<typeof createSupabaseServerClient>>>;
+  userId: string;
+  providers: DbAiProvider[];
+  rawPrompt: string;
+  filePrefix: string;
+}): Promise<{
+  url: string | null;
+  modelUsed?: string;
+  note?: string;
+}> {
+  const prompt = buildCompactPrompt(params.rawPrompt);
+  if (!prompt) {
+    return { url: null, note: "Prompt visual kosong." };
+  }
+
+  const [apiKey, aiBinding] = await Promise.all([
+    resolveGeminiKey(params.providers),
+    resolveWorkersAiBinding(),
+  ]);
+
+  let imageBuffer: Buffer | null = null;
+  let mimeType = "image/png";
+  let modelUsed = "";
+  const errors: string[] = [];
+
+  if (apiKey) {
+    const geminiImageModels = [
+      "gemini-3.1-flash-lite-image",
+      "gemini-3.1-flash-image",
+      "gemini-3-pro-image",
+    ];
+
+    for (const model of geminiImageModels) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
+          apiKey
+        )}`;
+
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
+          }),
+        });
+
+        const rawText = await res.text();
+        if (!res.ok) {
+          errors.push(`${model} (${res.status}): ${rawText.slice(0, 140)}`);
+          continue;
+        }
+
+        const parsed = JSON.parse(rawText) as {
+          candidates?: Array<{
+            content?: {
+              parts?: Array<{
+                inlineData?: { mimeType?: string; data?: string };
+              }>;
+            };
+          }>;
+        };
+
+        const inline = parsed.candidates?.[0]?.content?.parts?.find(
+          (pt) => pt.inlineData?.data
+        )?.inlineData;
+
+        if (inline?.data) {
+          imageBuffer = Buffer.from(inline.data, "base64");
+          mimeType = inline.mimeType || "image/png";
+          modelUsed = model;
+          break;
+        }
+
+        errors.push(`${model}: Tidak ada inlineData.`);
+      } catch (err) {
+        errors.push(
+          err instanceof Error ? `${model}: ${err.message}` : `${model}: Error`
+        );
+      }
+    }
+  }
+
+  if (!imageBuffer && aiBinding) {
+    try {
+      const englishPrompt = await translatePromptToEnglishForImage(
+        apiKey,
+        prompt
+      );
+      const output = await aiBinding.run(
+        "@cf/black-forest-labs/flux-1-schnell",
+        { prompt: englishPrompt }
+      );
+      const buf = extractImageBufferFromWorkersAi(output);
+      if (buf && buf.byteLength >= 1024) {
+        imageBuffer = buf;
+        mimeType = "image/png";
+        modelUsed = "workers-ai/flux-1-schnell";
+      } else {
+        errors.push("workers-ai/flux-1-schnell: Data gambar kosong.");
+      }
+    } catch (err) {
+      errors.push(
+        err instanceof Error ? `workers-ai: ${err.message}` : "workers-ai error"
+      );
+    }
+  }
+
+  if (!imageBuffer) {
+    return {
+      url: null,
+      note:
+        errors.length > 0
+          ? `Generator gambar belum berhasil (${errors.join(" | ")}).`
+          : "Gemini API key atau binding Workers AI ('AI') belum aktif.",
+    };
+  }
+
+  const ext =
+    mimeType.includes("jpeg") || mimeType.includes("jpg") ? "jpg" : "png";
+  const safePrefix = params.filePrefix
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]+/g, "-");
+  const filePath = `${params.userId}/${safePrefix}-${Date.now()}.${ext}`;
+
+  const bucketsToTry = [
+    "dnaverse-media",
+    "media",
+    "generated-images",
+    "public-media",
+  ];
+
+  for (const bucket of bucketsToTry) {
+    const { error: uploadErr } = await params.supabase.storage
+      .from(bucket)
+      .upload(filePath, imageBuffer, {
+        contentType: mimeType,
+        upsert: true,
+      });
+
+    if (!uploadErr) {
+      const { data: pubData } = params.supabase.storage
+        .from(bucket)
+        .getPublicUrl(filePath);
+      if (pubData?.publicUrl) {
+        return { url: pubData.publicUrl, modelUsed };
+      }
+    }
+  }
+
+  return {
+    url: null,
+    modelUsed,
+    note: "Gambar dibuat tetapi gagal diunggah ke bucket Supabase Storage.",
+  };
 }
 
 export async function POST(
@@ -223,6 +535,7 @@ export async function POST(
     });
 
     const isVideoFormat = agentCode === "video" || division === "reels";
+    const isPhotoFormat = division === "photo";
 
     const singleFinalOutputRule = `
 ATURAN KELUARAN TUNGGAL & KONTEN JADI (WAJIB DIPATUHI):
@@ -364,7 +677,7 @@ ${estimatedOutput}`;
       ? result.steps
       : result.steps.slice(0, 1);
 
-    const formattedStepsText = isVideoFormat
+    let baseContentText = isVideoFormat
       ? normalizedSteps
           .map(
             (s) =>
@@ -378,11 +691,45 @@ ${estimatedOutput}`;
           .filter(Boolean)
           .join("\n\n");
 
+    let generatedPhotoUrl: string | null = null;
+    let imageGenNote: string | undefined;
+    let imageModelUsed: string | undefined;
+
+    if (isPhotoFormat) {
+      await supabase
+        .from("tasks")
+        .update({ progress: 70 })
+        .eq("id", taskRow.id);
+
+      const visualPromptSource =
+        baseContentText || `${instruction} ${rootCommandTitle}`;
+      const imgRes = await generateAndUploadPhotoAsset({
+        supabase,
+        userId: user.id,
+        providers: (providers as DbAiProvider[]) ?? [],
+        rawPrompt: visualPromptSource,
+        filePrefix: `${agentCode}-${taskRow.id.slice(0, 8)}`,
+      });
+
+      generatedPhotoUrl = imgRes.url;
+      imageGenNote = imgRes.note;
+      imageModelUsed = imgRes.modelUsed;
+
+      if (generatedPhotoUrl) {
+        baseContentText = `${baseContentText}\n\nURL Gambar: ${generatedPhotoUrl}`.trim();
+      } else if (imageGenNote) {
+        baseContentText = `${baseContentText}\n\n(${imageGenNote})`.trim();
+      }
+    }
+
     const outputPayload = {
       summary: result.intentSummary || "Tugas selesai diproses.",
       deliverableType: estimatedOutput,
       division,
-      contentMarkdown: formattedStepsText || result.intentSummary,
+      contentMarkdown: baseContentText || result.intentSummary,
+      photoUrl: generatedPhotoUrl,
+      imageModelUsed: imageModelUsed ?? null,
+      imageGenNote: imageGenNote ?? null,
       steps: normalizedSteps,
       providerUsed: result.providerUsed,
       modelUsed: result.modelUsed,
@@ -415,6 +762,7 @@ ${estimatedOutput}`;
           modelUsed: result.modelUsed,
           agentCode,
           division,
+          ...(generatedPhotoUrl ? { photoUrl: generatedPhotoUrl } : {}),
           allowedTools: agentSpec.allowedTools,
         },
       })
