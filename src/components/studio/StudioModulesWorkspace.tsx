@@ -186,6 +186,67 @@ function sanitizeCaptionText(raw: string, fallbackTitle: string): string {
   return cleaned || fallbackTitle;
 }
 
+function composeUnifiedTextDeliverable(
+  t: TaskWithPayloads,
+  allTasks: TaskWithPayloads[]
+): string {
+  const out = (t.output_payload ?? {}) as Record<string, unknown>;
+  const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
+
+  const primaryRaw = String(
+    cp.caption || out.contentMarkdown || out.summary || t.title
+  );
+  const cleanPrimary = sanitizeCaptionText(primaryRaw, t.title).trim();
+
+  const runId = t.workflow_run_id;
+  if (runId) {
+    const companionTexts = allTasks
+      .filter((other) => {
+        if (other.id === t.id || other.status !== "completed") return false;
+        if (other.workflow_run_id !== runId) return false;
+        const otherPayload = (other.input_payload ?? {}) as Record<
+          string,
+          unknown
+        >;
+        const code = String(
+          otherPayload.agentCode ?? other.agent_code ?? ""
+        ).toLowerCase();
+        return code === "marketing" || code === "publishing";
+      })
+      .map((other) => {
+        const otherOut = (other.output_payload ?? {}) as Record<
+          string,
+          unknown
+        >;
+        const otherCp = (other.checkpoint_state ?? {}) as Record<
+          string,
+          unknown
+        >;
+        const rawOther = String(
+          otherCp.caption || otherOut.contentMarkdown || otherOut.summary || ""
+        );
+        return sanitizeCaptionText(rawOther, "").trim();
+      })
+      .filter((txt) => {
+        if (!txt) return false;
+        const normalizedPrimary = cleanPrimary
+          .toLowerCase()
+          .replace(/\s+/g, " ");
+        const normalizedOther = txt.toLowerCase().replace(/\s+/g, " ");
+        return (
+          normalizedPrimary !== normalizedOther &&
+          !normalizedPrimary.includes(normalizedOther.slice(0, 80))
+        );
+      });
+
+    if (companionTexts.length > 0) {
+      return `${cleanPrimary}\n\n${companionTexts.join("\n\n")}`.trim();
+    }
+  }
+
+  return cleanPrimary || t.title;
+}
+
 function inferTaskDivision(
   t: TaskWithPayloads
 ): Exclude<DivisionFilterKey, "all"> {
@@ -673,7 +734,6 @@ export function StudioModulesWorkspace({
 
   const getPublishItemState = (t: TaskWithPayloads): PublishItemState => {
     if (publishItems[t.id]) return publishItems[t.id];
-    const out = (t.output_payload ?? {}) as Record<string, unknown>;
     const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
     const inferredDiv = inferTaskDivision(t);
     const fallbackType: "reels" | "photo" | "text" =
@@ -689,15 +749,13 @@ export function StudioModulesWorkspace({
         ? cp.publishType
         : fallbackType;
 
-    const rawCaption = String(
-      cp.caption || out.contentMarkdown || out.summary || t.title
-    );
+    const unifiedCaption = composeUnifiedTextDeliverable(t, tasks);
 
     return {
       publishType: cpType,
       videoUrl: String(cp.videoUrl ?? ""),
       photoUrl: String(cp.photoUrl ?? ""),
-      caption: sanitizeCaptionText(rawCaption, t.title),
+      caption: unifiedCaption,
       autoPublishOnRender: Boolean(cp.autoPublishFacebook ?? true),
     };
   };
@@ -1816,7 +1874,7 @@ export function StudioModulesWorkspace({
                         {currentTab === "text" && (
                           <div className="space-y-2">
                             <textarea
-                              rows={3}
+                              rows={6}
                               value={item.caption}
                               onChange={(e) =>
                                 updatePublishItemState(t.id, item, {
@@ -1824,7 +1882,7 @@ export function StudioModulesWorkspace({
                                   caption: e.target.value,
                                 })
                               }
-                              className="w-full max-h-28 resize-none rounded-lg border border-slate-700 bg-slate-900/90 p-2 text-xs text-slate-200"
+                              className="w-full max-h-60 resize-y rounded-lg border border-slate-700 bg-slate-900/90 p-2.5 text-xs leading-relaxed text-slate-200"
                             />
                             <button
                               type="button"
