@@ -293,7 +293,7 @@ function buildReadyPublishItems(tasks: TaskWithPayloads[]): ReadyPublishItem[] {
     cp: Record<string, unknown>,
     stepOrder: number
   ): SlotGroup => {
-    const key = `${runId ?? "solo-${fallbackTask.id}"}::${slotKey}::${channel}`;
+    const key = `${runId ?? `solo-${fallbackTask.id}`}::${slotKey}::${channel}`;
     if (!groups.has(key)) {
       groups.set(key, {
         groupKey: key,
@@ -330,7 +330,6 @@ function buildReadyPublishItems(tasks: TaskWithPayloads[]): ReadyPublishItem[] {
 
   for (const task of tasks) {
     const role = detectAgentRole(task);
-    // Abaikan Idea Agent agar ide mentah tidak muncul sebagai item siap publish
     if (role === "idea") continue;
 
     const payload =
@@ -713,10 +712,13 @@ export function ContentStudioWorkspace() {
         nextCheckpoint.photoUrl = finalMedia;
       }
 
+      const targetIds =
+        item.sourceTaskIds.length > 0 ? item.sourceTaskIds : [item.taskId];
+
       const { error } = await supabase
         .from("tasks")
         .update({ checkpoint_state: nextCheckpoint })
-        .eq("id", item.taskId)
+        .in("id", targetIds)
         .eq("user_id", user.id);
 
       if (error) {
@@ -724,9 +726,10 @@ export function ContentStudioWorkspace() {
         return;
       }
 
+      const targetIdSet = new Set(targetIds);
       setTasks((prev) =>
         prev.map((t) =>
-          t.id === item.taskId ? { ...t, checkpoint_state: nextCheckpoint } : t
+          targetIdSet.has(t.id) ? { ...t, checkpoint_state: nextCheckpoint } : t
         )
       );
       setSavedIds((prev) => ({ ...prev, [item.id]: true }));
