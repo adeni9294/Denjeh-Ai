@@ -24,6 +24,8 @@ import {
   CheckCircle2,
   AlertCircle,
   Clock,
+  Sparkles,
+  Download,
 } from "lucide-react";
 
 export type StudioModuleKey =
@@ -43,6 +45,7 @@ export type DailySlotCheckStatus = "pending" | "success" | "failed";
 export interface DailyScheduleSlot {
   id: string;
   dateCode: string;
+  dateLabel: string;
   timeLabel: string;
   kind: DailySlotKind;
   title: string;
@@ -74,6 +77,19 @@ type WorkflowRunWithPlan = DbWorkflowRun & {
   plan_json?: Record<string, unknown> | null;
 };
 
+interface WorkflowMasterPromptItem {
+  id: string;
+  taskId: string;
+  workflowRunId: string | null;
+  stepOrder: number;
+  clipNumber?: number;
+  isClipMaster: boolean;
+  badgeLabel: string;
+  title: string;
+  subtitle: string;
+  promptText: string;
+}
+
 interface AgentModelPrefs {
   mode: "auto" | "manual";
   perAgent: Record<string, string>;
@@ -103,6 +119,15 @@ function getDateCodeWib(date: Date = new Date()): string {
   return `${day}${month}${year}`;
 }
 
+function formatDateLabelWib(date: Date = new Date()): string {
+  return new Intl.DateTimeFormat("id-ID", {
+    timeZone: "Asia/Jakarta",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  }).format(date);
+}
+
 function getCurrentWibMinutes(date: Date = new Date()): number {
   const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Asia/Jakarta",
@@ -114,51 +139,6 @@ function getCurrentWibMinutes(date: Date = new Date()): number {
   const hour = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
   const minute = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
   return hour * 60 + minute;
-}
-
-function buildDefaultDailySlots(dateCode: string): DailyScheduleSlot[] {
-  return [
-    {
-      id: `slot-${dateCode}-0800-story`,
-      dateCode,
-      timeLabel: "08.00",
-      kind: "story",
-      title: "Slot Pagi — Story Singkat",
-      caption: "Jadwal otomatis pukul 08.00 WIB (menunggu konten siap tayang).",
-      mediaUrl: "",
-      status: "pending",
-    },
-    {
-      id: `slot-${dateCode}-1100-photo`,
-      dateCode,
-      timeLabel: "11.00",
-      kind: "photo",
-      title: "Slot Siang — Konten Foto / Visual",
-      caption: "Jadwal otomatis pukul 11.00 WIB (menunggu konten siap tayang).",
-      mediaUrl: "",
-      status: "pending",
-    },
-    {
-      id: `slot-${dateCode}-1500-text`,
-      dateCode,
-      timeLabel: "15.00",
-      kind: "text",
-      title: "Slot Sore — Postingan Teks / Edukasi",
-      caption: "Jadwal otomatis pukul 15.00 WIB (menunggu konten siap tayang).",
-      mediaUrl: "",
-      status: "pending",
-    },
-    {
-      id: `slot-${dateCode}-1900-reels`,
-      dateCode,
-      timeLabel: "19.00",
-      kind: "reels",
-      title: "Slot Malam — Video / Reels",
-      caption: "Jadwal otomatis pukul 19.00 WIB (menunggu konten siap tayang).",
-      mediaUrl: "",
-      status: "pending",
-    },
-  ];
 }
 
 function sanitizeCaptionText(raw: string, fallbackTitle: string): string {
@@ -224,13 +204,26 @@ function inferTaskDivision(
   }
 
   const raw = `${t.title ?? ""} ${String(out.summary ?? "")}`.toLowerCase();
-  if (raw.includes("reels") || raw.includes("video")) return "reels";
-  if (raw.includes("story") || raw.includes("teaser")) return "story";
+  if (
+    raw.includes("reels") ||
+    raw.includes("video") ||
+    raw.includes("malam")
+  ) {
+    return "reels";
+  }
+  if (
+    raw.includes("story") ||
+    raw.includes("teaser") ||
+    raw.includes("pagi")
+  ) {
+    return "story";
+  }
   if (
     raw.includes("foto") ||
     raw.includes("photo") ||
     raw.includes("gambar") ||
-    raw.includes("visual")
+    raw.includes("visual") ||
+    raw.includes("siang")
   ) {
     return "photo";
   }
@@ -280,12 +273,94 @@ function formatDivisionLabel(div: Exclude<DivisionFilterKey, "all">): string {
   return "Teks";
 }
 
+function extractClipTitle(promptText: string, fallbackIndex: number): string {
+  const sceneMatch = promptText.match(/SCENE\s*\d+\s*:\s*(.+)/i);
+  const durationMatch = promptText.match(/DURATION\s*:\s*(.+)/i);
+  if (sceneMatch) {
+    const sceneLabel = sceneMatch[1].trim();
+    const durLabel = durationMatch ? ` (${durationMatch[1].trim()})` : "";
+    return `Scene ${String(fallbackIndex).padStart(2, "0")}: ${sceneLabel}${durLabel}`;
+  }
+  return `Clip #${String(fallbackIndex).padStart(2, "0")} — Master Prompt`;
+}
+
+function expandTaskToWorkflowPrompts(
+  task: TaskWithPayloads
+): WorkflowMasterPromptItem[] {
+  const payload = (task.input_payload ?? {}) as Record<string, unknown>;
+  const out = (task.output_payload ?? {}) as Record<string, unknown>;
+  const stepOrder = Number(payload.stepOrder ?? task.step_order ?? 1);
+  const code = String(
+    payload.agentCode || out.agentCode || task.agent_code || ""
+  )
+    .toLowerCase()
+    .trim();
+  const agentName = String(payload.agentName || payload.agentCode || "Agent");
+  const rawSteps = Array.isArray(out.steps)
+    ? (out.steps as Record<string, unknown>[])
+    : [];
+
+  if (code === "video" && rawSteps.length > 0) {
+    return rawSteps.map((s, idx) => {
+      const clipNum = Number(s.stepNumber ?? idx + 1);
+      const actionText = String(s.action ?? "").trim();
+      return {
+        id: `${task.id}-clip-${clipNum}-${idx}`,
+        taskId: task.id,
+        workflowRunId: task.workflow_run_id ?? null,
+        stepOrder,
+        clipNumber: clipNum,
+        isClipMaster: true,
+        badgeLabel: `Clip #${String(clipNum).padStart(2, "0")} • Master Prompt`,
+        title: extractClipTitle(actionText, clipNum),
+        subtitle: String(out.summary ?? task.title),
+        promptText: actionText,
+      };
+    });
+  }
+
+  const summary = String(out.summary ?? "").trim();
+  const contentMarkdown = String(out.contentMarkdown ?? "").trim();
+  const body =
+    contentMarkdown && summary && contentMarkdown !== summary
+      ? `${summary}\n\n${contentMarkdown}`
+      : contentMarkdown || summary || task.title;
+
+  return [
+    {
+      id: task.id,
+      taskId: task.id,
+      workflowRunId: task.workflow_run_id ?? null,
+      stepOrder,
+      isClipMaster: code === "video",
+      badgeLabel: code === "video" ? "Master Prompt Klip" : agentName,
+      title: `#${stepOrder} • ${task.title}`,
+      subtitle: String(payload.instruction ?? ""),
+      promptText: body,
+    },
+  ];
+}
+
+function downloadMdFile(filename: string, markdown: string) {
+  const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 export function StudioModulesWorkspace({
   moduleKey,
 }: {
   moduleKey: StudioModuleKey;
 }) {
-  const todayDateCode = useMemo(() => getDateCodeWib(), []);
+  const now = useMemo(() => new Date(), []);
+  const todayDateCode = useMemo(() => getDateCodeWib(now), [now]);
+  const todayDateLabel = useMemo(() => formatDateLabelWib(now), [now]);
   const [projects, setProjects] = useState<DbProject[]>([]);
   const [selectedProject, setSelectedProject] = useState<string>("");
   const [authReady, setAuthReady] = useState<boolean>(false);
@@ -561,7 +636,6 @@ export function StudioModulesWorkspace({
 
   const dailySlots = useMemo<DailyScheduleSlot[]>(() => {
     const currentWibMinutes = getCurrentWibMinutes(new Date());
-    const baseSlots = buildDefaultDailySlots(todayDateCode);
     const todayTasks = tasks.filter((t) => {
       const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
       const refDate = cp.publishedAt
@@ -570,80 +644,128 @@ export function StudioModulesWorkspace({
       return getDateCodeWib(refDate) === todayDateCode;
     });
 
-    return baseSlots.map((slot) => {
-      const [slotH, slotM] = slot.timeLabel.split(".").map((n) => Number(n));
-      const slotMinutes = (slotH || 0) * 60 + (slotM || 0);
-      const isPastSlot = currentWibMinutes > slotMinutes;
+    if (todayTasks.length === 0) {
+      return [];
+    }
 
-      const matchedTask = todayTasks.find((t) => {
-        const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
-        const explicitSlot = String(cp.slotKind ?? "").toLowerCase();
-        if (explicitSlot === slot.kind) return true;
-        return inferTaskDivision(t) === slot.kind;
-      });
+    const slotMetaMap: Record<
+      DailySlotKind,
+      { timeLabel: string; title: string; defaultCaption: string }
+    > = {
+      story: {
+        timeLabel: "08.00",
+        title: "Slot Pagi — Story Singkat",
+        defaultCaption: "Jadwal otomatis pukul 08.00 WIB.",
+      },
+      photo: {
+        timeLabel: "11.00",
+        title: "Slot Siang — Konten Foto / Visual",
+        defaultCaption: "Jadwal otomatis pukul 11.00 WIB.",
+      },
+      text: {
+        timeLabel: "15.00",
+        title: "Slot Sore — Postingan Teks / Edukasi",
+        defaultCaption: "Jadwal otomatis pukul 15.00 WIB.",
+      },
+      reels: {
+        timeLabel: "19.00",
+        title: "Slot Malam — Video / Reels",
+        defaultCaption: "Jadwal otomatis pukul 19.00 WIB.",
+      },
+    };
 
-      if (!matchedTask) {
-        return isPastSlot
-          ? {
-              ...slot,
-              status: "failed",
-              statusNote: "Terlewat jadwal otomatis (belum dieksekusi)",
-            }
-          : slot;
+    const groupedByKind = new Map<DailySlotKind, TaskWithPayloads>();
+    for (const t of todayTasks) {
+      const kind = inferTaskDivision(t);
+      if (!groupedByKind.has(kind)) {
+        groupedByKind.set(kind, t);
       }
+    }
 
-      const cp = (matchedTask.checkpoint_state ?? {}) as Record<
-        string,
-        unknown
-      >;
-      const out = (matchedTask.output_payload ?? {}) as Record<string, unknown>;
-      const fbId = extractFbPostId(matchedTask);
-      const publishStatus = String(
-        cp.publishStatus ?? out.publishStatus ?? ""
-      ).toLowerCase();
-      const publishError = String(
-        cp.publishError ?? out.publishError ?? ""
-      ).trim();
-      const contentPreview = getPublishedContentText(matchedTask);
+    const orderedKinds: DailySlotKind[] = ["story", "photo", "text", "reels"];
 
-      if (fbId || publishStatus === "published") {
-        const publishedTime = cp.publishedAt
-          ? new Date(String(cp.publishedAt)).toLocaleTimeString("id-ID", {
+    return orderedKinds
+      .filter((kind) => groupedByKind.has(kind))
+      .map((kind) => {
+        const matchedTask = groupedByKind.get(kind)!;
+        const meta = slotMetaMap[kind];
+        const [slotH, slotM] = meta.timeLabel.split(".").map((n) => Number(n));
+        const slotMinutes = (slotH || 0) * 60 + (slotM || 0);
+        const isPastSlot = currentWibMinutes > slotMinutes;
+
+        const cp = (matchedTask.checkpoint_state ?? {}) as Record<
+          string,
+          unknown
+        >;
+        const out = (matchedTask.output_payload ?? {}) as Record<
+          string,
+          unknown
+        >;
+        const fbId = extractFbPostId(matchedTask);
+        const publishStatus = String(
+          cp.publishStatus ?? out.publishStatus ?? ""
+        ).toLowerCase();
+        const publishError = String(
+          cp.publishError ?? out.publishError ?? ""
+        ).trim();
+        const contentPreview =
+          getPublishedContentText(matchedTask) || meta.defaultCaption;
+
+        let status: DailySlotCheckStatus = "pending";
+        let statusNote: string | undefined;
+        let lastRunAt: string | undefined;
+
+        if (fbId || publishStatus === "published") {
+          status = "success";
+          statusNote = fbId ? `Sukses posting (ID: ${fbId})` : "Sukses posting";
+          if (cp.publishedAt) {
+            const publishedTime = new Date(
+              String(cp.publishedAt)
+            ).toLocaleTimeString("id-ID", {
               timeZone: "Asia/Jakarta",
               hour: "2-digit",
               minute: "2-digit",
-            })
-          : "";
-        return {
-          ...slot,
-          caption: contentPreview,
-          status: "success",
-          statusNote: fbId ? `Sukses posting (ID: ${fbId})` : "Sukses posting",
-          lastRunAt: publishedTime ? `${publishedTime} WIB` : undefined,
-        };
-      }
+            });
+            lastRunAt = `${publishedTime} WIB`;
+          }
+        } else if (publishStatus === "failed" || publishError) {
+          status = "failed";
+          statusNote = publishError || "Gagal posting";
+        } else if (isPastSlot) {
+          status = "failed";
+          statusNote = "Terlewat jadwal otomatis";
+        }
 
-      if (publishStatus === "failed" || publishError) {
         return {
-          ...slot,
+          id: `slot-${todayDateCode}-${meta.timeLabel.replace(".", "")}-${kind}`,
+          dateCode: todayDateCode,
+          dateLabel: todayDateLabel,
+          timeLabel: meta.timeLabel,
+          kind,
+          title: meta.title,
           caption: contentPreview,
-          status: "failed",
-          statusNote: publishError || "Gagal posting",
+          mediaUrl: String(cp.photoUrl ?? cp.videoUrl ?? "").trim(),
+          status,
+          statusNote,
+          lastRunAt,
         };
-      }
+      });
+  }, [tasks, todayDateCode, todayDateLabel]);
 
-      return {
-        ...slot,
-        caption: contentPreview,
-        ...(isPastSlot
-          ? {
-              status: "failed" as const,
-              statusNote: "Terlewat jadwal otomatis",
-            }
-          : {}),
-      };
-    });
-  }, [tasks, todayDateCode]);
+  const workflowMasterPrompts = useMemo<WorkflowMasterPromptItem[]>(() => {
+    const completed = tasks
+      .filter((t) => t.status === "completed")
+      .sort((a, b) => {
+        const aOrder = Number(
+          (a.input_payload ?? {}).stepOrder ?? a.step_order ?? 0
+        );
+        const bOrder = Number(
+          (b.input_payload ?? {}).stepOrder ?? b.step_order ?? 0
+        );
+        return aOrder - bOrder;
+      });
+    return completed.flatMap(expandTaskToWorkflowPrompts);
+  }, [tasks]);
 
   const completedTasks = tasks.filter((t) => t.status === "completed");
   const publishedTasks = useMemo(
@@ -869,63 +991,160 @@ export function StudioModulesWorkspace({
           </div>
         </div>
       ) : moduleKey === "workflows" ? (
-        <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <GitBranch className="h-5 w-5 text-blue-400" />
-              <h2 className="text-base font-semibold">
-                Alur Workflow & DAG Tersimpan ({runs.length})
-              </h2>
+        <div className="space-y-4">
+          <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <GitBranch className="h-5 w-5 text-blue-400" />
+                <h2 className="text-base font-semibold">
+                  Alur Workflow & DAG Tersimpan ({runs.length})
+                </h2>
+              </div>
+              <Badge variant="blue">PostgreSQL</Badge>
             </div>
-            <Badge variant="blue">PostgreSQL</Badge>
+
+            {runs.length === 0 ? (
+              <p className="text-xs text-slate-400">
+                Belum ada workflow run untuk filter ini.
+              </p>
+            ) : (
+              <div className="space-y-2.5">
+                {runs.map((r) => {
+                  const meta = (r as WorkflowRunWithPlan).plan_json ?? {};
+                  const steps = Array.isArray(meta.steps)
+                    ? (meta.steps as Record<string, unknown>[])
+                    : [];
+                  return (
+                    <div
+                      key={r.id}
+                      className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-3.5 space-y-2 text-xs"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold">
+                          {String(
+                            meta.title || r.title || `Run #${r.id.slice(0, 8)}`
+                          )}
+                        </span>
+                        <Badge
+                          variant={
+                            r.status === "completed" ? "emerald" : "amber"
+                          }
+                        >
+                          {r.status}
+                        </Badge>
+                      </div>
+                      {steps.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 pt-1">
+                          {steps.map((s, idx) => (
+                            <span
+                              key={idx}
+                              className="rounded-md border border-slate-700 bg-slate-800/80 px-2 py-0.5 text-[11px] text-slate-300"
+                            >
+                              #{String(s.stepNumber ?? idx + 1)}{" "}
+                              {String(s.agentName ?? s.agentCode ?? "Step")}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
-          {runs.length === 0 ? (
-            <p className="text-xs text-slate-400">
-              Belum ada workflow run untuk filter ini.
-            </p>
-          ) : (
-            <div className="space-y-2.5">
-              {runs.map((r) => {
-                const meta = (r as WorkflowRunWithPlan).plan_json ?? {};
-                const steps = Array.isArray(meta.steps)
-                  ? (meta.steps as Record<string, unknown>[])
-                  : [];
-                return (
-                  <div
-                    key={r.id}
-                    className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-3.5 space-y-2 text-xs"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-semibold">
-                        {String(
-                          meta.title || r.title || `Run #${r.id.slice(0, 8)}`
-                        )}
-                      </span>
-                      <Badge
-                        variant={r.status === "completed" ? "emerald" : "amber"}
-                      >
-                        {r.status}
-                      </Badge>
-                    </div>
-                    {steps.length > 0 && (
-                      <div className="flex flex-wrap gap-1.5 pt-1">
-                        {steps.map((s, idx) => (
-                          <span
-                            key={idx}
-                            className="rounded-md border border-slate-700 bg-slate-800/80 px-2 py-0.5 text-[11px] text-slate-300"
-                          >
-                            #{String(s.stepNumber ?? idx + 1)}{" "}
-                            {String(s.agentName ?? s.agentCode ?? "Step")}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
+          <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-5 w-5 text-purple-400" />
+                <h2 className="text-base font-semibold">
+                  Katalog Master Prompt & Artefak Langkah (
+                  {workflowMasterPrompts.length})
+                </h2>
+              </div>
+              <Badge variant="purple">Master Prompt Workflow</Badge>
             </div>
-          )}
+
+            {workflowMasterPrompts.length === 0 ? (
+              <p className="text-xs text-slate-400">
+                Belum ada master prompt langkah workflow yang selesai untuk
+                filter ini.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {workflowMasterPrompts.map((item) => {
+                  const copyId = `wf-prompt-${item.id}`;
+                  const isCopied = copiedKey === copyId;
+                  return (
+                    <div
+                      key={item.id}
+                      className="rounded-xl border border-slate-700/60 bg-slate-900/70 p-4 space-y-2.5 text-xs"
+                    >
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div className="space-y-0.5">
+                          <div className="flex flex-wrap items-center gap-2 font-semibold">
+                            <span className="text-sm text-slate-100">
+                              {item.title}
+                            </span>
+                            <Badge variant={item.isClipMaster ? "purple" : "blue"}>
+                              {item.badgeLabel}
+                            </Badge>
+                          </div>
+                          {item.subtitle && (
+                            <p className="text-[11px] text-slate-400">
+                              {item.subtitle}
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void handleCopyText(copyId, item.promptText)
+                            }
+                            className="inline-flex items-center gap-1 rounded-lg border border-purple-500/40 bg-purple-600/20 px-2.5 py-1 text-[11px] font-medium text-purple-200 hover:bg-purple-600/30"
+                          >
+                            {isCopied ? (
+                              <>
+                                <Check className="h-3 w-3 text-emerald-400" />
+                                <span>Tersalin</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="h-3 w-3 text-purple-300" />
+                                <span>Salin Master Prompt</span>
+                              </>
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const slug = item.clipNumber
+                                ? `clip-${String(item.clipNumber).padStart(2, "0")}-master-prompt`
+                                : `step-${item.stepOrder}-master-prompt`;
+                              downloadMdFile(
+                                `${slug}.md`,
+                                `# ${item.title}\n\n${item.promptText}\n`
+                              );
+                            }}
+                            className="inline-flex items-center gap-1 rounded-lg border border-slate-600/40 bg-slate-800/70 px-2.5 py-1 text-[11px] text-slate-200 hover:bg-slate-700/70"
+                          >
+                            <Download className="h-3 w-3 text-blue-400" />
+                            <span>.md</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      <pre className="rounded-xl border border-slate-800 bg-slate-950/80 p-3 whitespace-pre-wrap font-mono text-[11px] text-slate-200 leading-relaxed overflow-x-auto">
+                        {item.promptText}
+                      </pre>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
       ) : moduleKey === "planner" ? (
         <div className="space-y-4">
@@ -933,66 +1152,73 @@ export function StudioModulesWorkspace({
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h2 className="text-base font-semibold">
-                  Jadwal Posting Harian Otomatis (Tanggal {todayDateCode})
+                  Jadwal Posting Harian Otomatis ({todayDateLabel})
                 </h2>
                 <p className="text-xs text-slate-400">
-                  Berjalan otomatis sesuai jadwal WIB melalui cron harian;
-                  centang hijau (✓) bila sukses tayang dan silang merah (✕) bila
-                  gagal / terlewat.
+                  Disusun otomatis dari tugas aktif sesuai jadwal WIB; centang
+                  hijau (✓) bila sukses tayang dan silang merah (✕) bila gagal /
+                  terlewat.
                 </p>
               </div>
               <Badge variant="blue">Auto-Schedule WIB</Badge>
             </div>
 
-            <div className="space-y-2">
-              {dailySlots.map((slot) => (
-                <div
-                  key={slot.id}
-                  className="rounded-xl border border-slate-700/60 bg-slate-900/70 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
-                >
-                  <div className="space-y-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="rounded bg-slate-800 px-2 py-0.5 font-mono text-[11px] text-blue-300">
-                        {slot.dateCode} • {slot.timeLabel} WIB
-                      </span>
-                      <span className="font-semibold text-slate-100">
-                        {slot.title}
-                      </span>
+            {dailySlots.length === 0 ? (
+              <p className="text-xs text-slate-400 py-2">
+                Belum ada jadwal slot aktif untuk {todayDateLabel}. Kirim
+                perintah di AI Command Center untuk membuat tugas slot tertentu.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {dailySlots.map((slot) => (
+                  <div
+                    key={slot.id}
+                    className="rounded-xl border border-slate-700/60 bg-slate-900/70 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                  >
+                    <div className="space-y-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="rounded bg-slate-800 px-2 py-0.5 font-mono text-[11px] text-blue-300">
+                          {slot.dateLabel} • {slot.timeLabel} WIB
+                        </span>
+                        <span className="font-semibold text-slate-100">
+                          {slot.title}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 truncate">
+                        {slot.caption}
+                      </p>
                     </div>
-                    <p className="text-[11px] text-slate-400 truncate">
-                      {slot.caption}
-                    </p>
-                  </div>
 
-                  <div className="flex items-center gap-2 shrink-0 flex-wrap">
-                    {slot.status === "success" ? (
-                      <span className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
-                        <Check className="h-3.5 w-3.5" />
-                        <span>
-                          {slot.statusNote || "Sukses posting"}
-                          {slot.lastRunAt ? ` (${slot.lastRunAt})` : ""}
+                    <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                      {slot.status === "success" ? (
+                        <span className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
+                          <Check className="h-3.5 w-3.5" />
+                          <span>
+                            {slot.statusNote || "Sukses posting"}
+                            {slot.lastRunAt ? ` (${slot.lastRunAt})` : ""}
+                          </span>
                         </span>
-                      </span>
-                    ) : slot.status === "failed" ? (
-                      <span className="inline-flex items-center gap-1 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2.5 py-1 text-[11px] font-semibold text-rose-300">
-                        <X className="h-3.5 w-3.5" />
-                        <span>
-                          {slot.statusNote
-                            ? `Gagal posting: ${slot.statusNote}`
-                            : "Gagal posting"}
-                          {slot.lastRunAt ? ` (${slot.lastRunAt})` : ""}
+                      ) : slot.status === "failed" ? (
+                        <span className="inline-flex items-center gap-1 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2.5 py-1 text-[11px] font-semibold text-rose-300">
+                          <X className="h-3.5 w-3.5" />
+                          <span>
+                            {slot.statusNote
+                              ? `Gagal posting: ${slot.statusNote}`
+                              : "Gagal posting"}
+                            {slot.lastRunAt ? ` (${slot.lastRunAt})` : ""}
+                          </span>
                         </span>
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] font-medium text-amber-300">
-                        <Clock className="h-3 w-3" />
-                        <span>Menunggu Jadwal</span>
-                      </span>
-                    )}
+                      ) : (
+                        <span className="inline-flex items-center gap-1 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] font-medium text-amber-300">
+                          <Clock className="h-3 w-3" />
+                          <span>Menunggu Jadwal</span>
+                        </span>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
