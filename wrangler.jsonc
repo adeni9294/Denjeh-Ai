@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "denjeh-ai",
+  "compatibility_date": "2025-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": {
+    "binding": "AI"
+  },
+  "images": {
+    "binding": "IMAGES"
+  },
+  "services": [
+    {
+      "binding": "WORKER_SELF_REFERENCE",
+      "service": "denjeh-ai"
+    }
+  ],
+  "vars": {
+    "NEXT_PUBLIC_SUPABASE_URL": "https://ixylgwkyvqcxydeiaso.supabase.co"
+  }
+}
