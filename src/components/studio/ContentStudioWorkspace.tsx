@@ -58,7 +58,7 @@ const PUBLISH_TABS: {
   {
     key: "story",
     label: "Story",
-    outputSummary: "Foto / Teks",
+    outputSummary: "Khusus Story (Wajib Media)",
     defaultSlotTime: "08.00 WIB",
   },
   {
@@ -80,6 +80,12 @@ const PUBLISH_TABS: {
     defaultSlotTime: "19.00 WIB",
   },
 ];
+
+function isValidMediaUrl(url: string): boolean {
+  const trimmed = url.trim();
+  if (!trimmed || trimmed.includes("...")) return false;
+  return /^https?:\/\/[^\s]+$/i.test(trimmed);
+}
 
 function cleanReadableText(raw: string, fallbackTitle: string): string {
   const normalized = raw
@@ -277,7 +283,8 @@ function inferPublishChannel(task: TaskWithPayloads): ReadyPublishTabKey {
       : {};
 
   const explicit = String(
-    cp.slotKind ??
+    cp.publishTarget ??
+      cp.slotKind ??
       cp.publishType ??
       payload.slotKind ??
       payload.publishType ??
@@ -755,6 +762,28 @@ export function ContentStudioWorkspace() {
     const finalText = formatContentByChannel(finalChannel, rawDraft);
     const finalMedia = (draftMediaUrls[item.id] ?? item.mediaUrl).trim();
 
+    if (finalChannel === "story" && !isValidMediaUrl(finalMedia)) {
+      setErrorMsg(
+        "Untuk mencegah salah post ke feed publik, kanal Story wajib memiliki URL gambar atau video (.jpg/.png/.mp4) yang valid sebelum ditandai Siap Publish."
+      );
+      setSavingId(null);
+      return;
+    }
+
+    if (finalChannel === "photo" && !isValidMediaUrl(finalMedia) && !finalText) {
+      setErrorMsg("Konten Foto siap publish tidak boleh kosong.");
+      setSavingId(null);
+      return;
+    }
+
+    if (finalChannel === "reels" && !isValidMediaUrl(finalMedia)) {
+      setErrorMsg(
+        "Kanal Reels memerlukan URL video (.mp4) yang valid sebelum ditandai Siap Publish."
+      );
+      setSavingId(null);
+      return;
+    }
+
     if (!finalText && !finalMedia) {
       setErrorMsg("Konten siap publish tidak boleh kosong.");
       setSavingId(null);
@@ -768,13 +797,21 @@ export function ContentStudioWorkspace() {
       } = await supabase.auth.getUser();
       if (!user) return;
 
+      const isVideoStory =
+        finalChannel === "story" && /\.mp4(\?|$)/i.test(finalMedia);
+
       const nextCheckpoint: Record<string, unknown> = {
         ...item.checkpointState,
         slotKind: finalChannel,
+        publishTarget: finalChannel === "story" ? "story" : "feed",
         publishType:
-          finalChannel === "reels"
+          finalChannel === "story"
+            ? isVideoStory
+              ? "story_video"
+              : "story_photo"
+            : finalChannel === "reels"
             ? "reels"
-            : finalChannel === "photo" || finalChannel === "story"
+            : finalChannel === "photo"
             ? "photo"
             : "text",
         caption: finalText,
@@ -783,10 +820,12 @@ export function ContentStudioWorkspace() {
         preparedAt: new Date().toISOString(),
       };
 
-      if (finalChannel === "reels") {
+      if (finalChannel === "reels" || isVideoStory) {
         nextCheckpoint.videoUrl = finalMedia;
+        delete nextCheckpoint.photoUrl;
       } else if (finalMedia) {
         nextCheckpoint.photoUrl = finalMedia;
+        delete nextCheckpoint.videoUrl;
       }
 
       const targetIds =
@@ -812,7 +851,9 @@ export function ContentStudioWorkspace() {
       setDraftTexts((prev) => ({ ...prev, [item.id]: finalText }));
       setSavedIds((prev) => ({ ...prev, [item.id]: true }));
       setInfoMsg(
-        `Konten "${item.title}" ditandai Siap Publish untuk kanal ${finalChannel.toUpperCase()} (${item.slotTimeLabel}).`
+        finalChannel === "story"
+          ? `Konten "${item.title}" dikunci khusus ke target STORY (bukan feed publik) pada ${item.slotTimeLabel}.`
+          : `Konten "${item.title}" ditandai Siap Publish untuk kanal ${finalChannel.toUpperCase()} (${item.slotTimeLabel}).`
       );
     } catch (err) {
       setErrorMsg(
@@ -970,6 +1011,15 @@ export function ContentStudioWorkspace() {
           </div>
         </div>
 
+        {activeTab === "story" && (
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3.5 py-2.5 text-[11px] text-amber-200">
+            <strong>Proteksi Story:</strong> Item di tab Story ditandai khusus
+            untuk target <strong>Story</strong> (bukan feed publik) dan
+            memerlukan URL gambar/video (.jpg/.png/.mp4) yang valid agar tidak
+            salah terbit sebagai postingan publik.
+          </div>
+        )}
+
         {loading ? (
           <p className="text-xs text-slate-400 py-6">
             Memuat konten siap publish...
@@ -999,6 +1049,8 @@ export function ContentStudioWorkspace() {
               const isSaving = savingId === item.id;
               const isReady =
                 Boolean(savedIds[item.id]) || item.isReadyToPublish;
+              const storyMissingMedia =
+                currentChannel === "story" && !isValidMediaUrl(currentMedia);
 
               return (
                 <div
@@ -1013,6 +1065,13 @@ export function ContentStudioWorkspace() {
                         </span>
                         <Badge variant={isReady ? "emerald" : "blue"}>
                           {isReady ? "Siap Publish" : "Draf Siap Rilis"}
+                        </Badge>
+                        <Badge
+                          variant={currentChannel === "story" ? "purple" : "blue"}
+                        >
+                          {currentChannel === "story"
+                            ? "Target: Story Only"
+                            : `Target: ${currentChannel.toUpperCase()}`}
                         </Badge>
                         <span className="text-[11px] text-slate-400">
                           Jadwal: {item.slotTimeLabel} ·{" "}
@@ -1041,7 +1100,7 @@ export function ContentStudioWorkspace() {
                         aria-label={`Pindahkan kanal untuk ${item.title}`}
                         className="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] text-slate-200"
                       >
-                        <option value="story">Tab Story (Foto / Teks)</option>
+                        <option value="story">Tab Story (Story Only)</option>
                         <option value="photo">
                           Tab Foto (Foto + Caption & Hashtag)
                         </option>
@@ -1121,14 +1180,26 @@ export function ContentStudioWorkspace() {
                         placeholder={
                           currentChannel === "reels"
                             ? "URL video Reels (.mp4) siap publish..."
+                            : currentChannel === "story"
+                            ? "Wajib URL gambar (.jpg/.png/.webp) atau video (.mp4) untuk Story..."
                             : "URL gambar / visual (.jpg/.png/.webp) siap publish..."
                         }
-                        className="w-full rounded-xl border border-slate-700/70 bg-slate-950/80 px-3 py-1.5 text-xs text-slate-200 focus:border-blue-500 focus:outline-none"
+                        className={`w-full rounded-xl border bg-slate-950/80 px-3 py-1.5 text-xs text-slate-200 focus:border-blue-500 focus:outline-none ${
+                          storyMissingMedia
+                            ? "border-amber-500/60"
+                            : "border-slate-700/70"
+                        }`}
                       />
 
-                      {currentMedia &&
-                        /^https?:\/\//i.test(currentMedia) &&
-                        !currentMedia.includes("...") &&
+                      {storyMissingMedia && (
+                        <p className="text-[11px] text-amber-300">
+                          Isi URL media valid agar Story tidak tertahan atau
+                          salah terbit ke feed publik.
+                        </p>
+                      )}
+
+                      {isValidMediaUrl(currentMedia) &&
+                        !/\.mp4(\?|$)/i.test(currentMedia) &&
                         currentChannel !== "reels" && (
                           <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-950 p-1.5">
                             <img
