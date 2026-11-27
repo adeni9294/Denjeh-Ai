@@ -42,6 +42,15 @@ function getSupabaseAdminClient() {
   });
 }
 
+function inferSlotKindFromWibHour(
+  hour: number
+): "story" | "photo" | "text" | "reels" {
+  if (hour < 10) return "story";
+  if (hour < 14) return "photo";
+  if (hour < 18) return "text";
+  return "reels";
+}
+
 async function postTextToFacebookPage(params: {
   pageId: string;
   accessToken: string;
@@ -72,7 +81,7 @@ async function postTextToFacebookPage(params: {
   return data.post_id || data.id || "posted";
 }
 
-export async function POST(req: NextRequest) {
+async function runDailyPublishCron(req: NextRequest) {
   const authHeader = (req.headers.get("authorization") || "").trim();
   const expectedSecret = (process.env.CRON_SECRET || "").trim();
 
@@ -93,8 +102,8 @@ export async function POST(req: NextRequest) {
   try {
     const supabase = getSupabaseAdminClient();
     const wib = getWibHourMinute(new Date());
+    const slotKind = inferSlotKindFromWibHour(wib.hour);
 
-    // Ambil kredensial FB Page yang tersimpan di memories
     const { data: credRows, error: credErr } = await supabase
       .from("memories")
       .select("user_id, content")
@@ -142,7 +151,6 @@ export async function POST(req: NextRequest) {
         continue;
       }
 
-      // Cari 1 tugas completed yang belum diposting ke FB
       const { data: candidateTasks } = await supabase
         .from("tasks")
         .select("id, title, output_payload, checkpoint_state")
@@ -196,8 +204,11 @@ export async function POST(req: NextRequest) {
             checkpoint_state: {
               ...cp,
               facebookPostId: postId,
+              publishStatus: "published",
+              publishError: null,
               publishedAt: new Date().toISOString(),
               autoScheduledDateCode: wib.dateCode,
+              slotKind: String(cp.slotKind || slotKind),
             },
           })
           .eq("id", targetTask.id);
@@ -208,11 +219,26 @@ export async function POST(req: NextRequest) {
           detail: `Task ${targetTask.id.slice(0, 8)} terkirim ke FB (ID: ${postId}).`,
         });
       } catch (postErr) {
+        const errMessage =
+          postErr instanceof Error ? postErr.message : "Gagal posting ke FB.";
+
+        await supabase
+          .from("tasks")
+          .update({
+            checkpoint_state: {
+              ...cp,
+              publishStatus: "failed",
+              publishError: errMessage,
+              autoScheduledDateCode: wib.dateCode,
+              slotKind: String(cp.slotKind || slotKind),
+            },
+          })
+          .eq("id", targetTask.id);
+
         results.push({
           userId,
           status: "failed",
-          detail:
-            postErr instanceof Error ? postErr.message : "Gagal posting ke FB.",
+          detail: errMessage,
         });
       }
     }
@@ -231,4 +257,12 @@ export async function POST(req: NextRequest) {
       { status: 500 }
     );
   }
+}
+
+export async function POST(req: NextRequest) {
+  return runDailyPublishCron(req);
+}
+
+export async function GET(req: NextRequest) {
+  return runDailyPublishCron(req);
 }
