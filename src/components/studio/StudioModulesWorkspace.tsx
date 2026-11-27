@@ -21,13 +21,9 @@ import {
   X,
   ArrowUpRight,
   Cpu,
-  Video,
-  Image as ImageIcon,
-  FileText,
   CheckCircle2,
   AlertCircle,
-  Zap,
-  Play,
+  Clock,
 } from "lucide-react";
 
 export type StudioModuleKey =
@@ -83,14 +79,6 @@ interface AgentModelPrefs {
   perAgent: Record<string, string>;
 }
 
-interface PublishItemState {
-  publishType: "reels" | "photo" | "text";
-  videoUrl: string;
-  photoUrl: string;
-  caption: string;
-  autoPublishOnRender: boolean;
-}
-
 const STORAGE_KEY = "denjeh_agent_model_prefs";
 
 const FALLBACK_MODEL_OPTIONS = [
@@ -101,13 +89,13 @@ const FALLBACK_MODEL_OPTIONS = [
   { id: "llama-3.1-8b-instant", label: "Llama 3.1 8B Instant (Groq)" },
 ];
 
-function getTodayDateCodeWib(): string {
+function getDateCodeWib(date: Date = new Date()): string {
   const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Asia/Jakarta",
     day: "2-digit",
     month: "2-digit",
     year: "2-digit",
-  }).formatToParts(new Date());
+  }).formatToParts(date);
 
   const day = parts.find((p) => p.type === "day")?.value ?? "01";
   const month = parts.find((p) => p.type === "month")?.value ?? "01";
@@ -123,7 +111,7 @@ function buildDefaultDailySlots(dateCode: string): DailyScheduleSlot[] {
       timeLabel: "08.00",
       kind: "story",
       title: "Slot Pagi — Story Singkat",
-      caption: "Sapaan pagi & pemantik interaksi singkat hari ini.",
+      caption: "Jadwal otomatis pukul 08.00 WIB (menunggu konten siap tayang).",
       mediaUrl: "",
       status: "pending",
     },
@@ -133,7 +121,7 @@ function buildDefaultDailySlots(dateCode: string): DailyScheduleSlot[] {
       timeLabel: "11.00",
       kind: "photo",
       title: "Slot Siang — Konten Foto / Visual",
-      caption: "Visual tunggal dengan pesan utama yang jelas.",
+      caption: "Jadwal otomatis pukul 11.00 WIB (menunggu konten siap tayang).",
       mediaUrl: "",
       status: "pending",
     },
@@ -143,7 +131,7 @@ function buildDefaultDailySlots(dateCode: string): DailyScheduleSlot[] {
       timeLabel: "15.00",
       kind: "text",
       title: "Slot Sore — Postingan Teks / Edukasi",
-      caption: "Ringkasan insight, tips praktis, atau diskusi santai.",
+      caption: "Jadwal otomatis pukul 15.00 WIB (menunggu konten siap tayang).",
       mediaUrl: "",
       status: "pending",
     },
@@ -153,7 +141,7 @@ function buildDefaultDailySlots(dateCode: string): DailyScheduleSlot[] {
       timeLabel: "19.00",
       kind: "reels",
       title: "Slot Malam — Video / Reels",
-      caption: "Cuplikan video pendek berdurasi singkat.",
+      caption: "Jadwal otomatis pukul 19.00 WIB (menunggu konten siap tayang).",
       mediaUrl: "",
       status: "pending",
     },
@@ -186,72 +174,12 @@ function sanitizeCaptionText(raw: string, fallbackTitle: string): string {
   return cleaned || fallbackTitle;
 }
 
-function composeUnifiedTextDeliverable(
-  t: TaskWithPayloads,
-  allTasks: TaskWithPayloads[]
-): string {
-  const out = (t.output_payload ?? {}) as Record<string, unknown>;
-  const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
-
-  const primaryRaw = String(
-    cp.caption || out.contentMarkdown || out.summary || t.title
-  );
-  const cleanPrimary = sanitizeCaptionText(primaryRaw, t.title).trim();
-
-  const runId = t.workflow_run_id;
-  if (runId) {
-    const companionTexts = allTasks
-      .filter((other) => {
-        if (other.id === t.id || other.status !== "completed") return false;
-        if (other.workflow_run_id !== runId) return false;
-        const otherPayload = (other.input_payload ?? {}) as Record<
-          string,
-          unknown
-        >;
-        const code = String(
-          otherPayload.agentCode ?? other.agent_code ?? ""
-        ).toLowerCase();
-        return code === "marketing" || code === "publishing";
-      })
-      .map((other) => {
-        const otherOut = (other.output_payload ?? {}) as Record<
-          string,
-          unknown
-        >;
-        const otherCp = (other.checkpoint_state ?? {}) as Record<
-          string,
-          unknown
-        >;
-        const rawOther = String(
-          otherCp.caption || otherOut.contentMarkdown || otherOut.summary || ""
-        );
-        return sanitizeCaptionText(rawOther, "").trim();
-      })
-      .filter((txt) => {
-        if (!txt) return false;
-        const normalizedPrimary = cleanPrimary
-          .toLowerCase()
-          .replace(/\s+/g, " ");
-        const normalizedOther = txt.toLowerCase().replace(/\s+/g, " ");
-        return (
-          normalizedPrimary !== normalizedOther &&
-          !normalizedPrimary.includes(normalizedOther.slice(0, 80))
-        );
-      });
-
-    if (companionTexts.length > 0) {
-      return `${cleanPrimary}\n\n${companionTexts.join("\n\n")}`.trim();
-    }
-  }
-
-  return cleanPrimary || t.title;
-}
-
 function inferTaskDivision(
   t: TaskWithPayloads
 ): Exclude<DivisionFilterKey, "all"> {
   const payload = (t.input_payload ?? {}) as Record<string, unknown>;
   const out = (t.output_payload ?? {}) as Record<string, unknown>;
+  const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
   const code = String(payload.agentCode ?? t.agent_code ?? "")
     .toLowerCase()
     .trim();
@@ -262,7 +190,12 @@ function inferTaskDivision(
   if (code === "text") return "text";
 
   const explicitDiv = String(
-    out.division ?? payload.division ?? payload.contentType ?? ""
+    cp.slotKind ??
+      cp.publishType ??
+      out.division ??
+      payload.division ??
+      payload.contentType ??
+      ""
   )
     .toLowerCase()
     .trim();
@@ -291,44 +224,47 @@ function inferTaskDivision(
   return "text";
 }
 
-function isFinishedDeliverableTask(t: TaskWithPayloads): boolean {
-  if (t.status !== "completed") return false;
-
-  const payload = (t.input_payload ?? {}) as Record<string, unknown>;
-  const out = (t.output_payload ?? {}) as Record<string, unknown>;
+function extractFbPostId(t: TaskWithPayloads): string {
   const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
-  const code = String(payload.agentCode ?? t.agent_code ?? "")
+  const out = (t.output_payload ?? {}) as Record<string, unknown>;
+  return String(
+    cp.facebookPostId ??
+      cp.fbPostId ??
+      cp.postId ??
+      out.facebookPostId ??
+      out.fbPostId ??
+      out.postId ??
+      ""
+  ).trim();
+}
+
+function isPublishedToFacebook(t: TaskWithPayloads): boolean {
+  const fbId = extractFbPostId(t);
+  const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
+  const out = (t.output_payload ?? {}) as Record<string, unknown>;
+  const publishStatus = String(
+    cp.publishStatus ?? out.publishStatus ?? t.status ?? ""
+  )
     .toLowerCase()
     .trim();
 
-  const intermediateCodes = new Set([
-    "idea",
-    "research",
-    "orchestrator",
-    "quality",
-  ]);
-  if (intermediateCodes.has(code)) {
-    return false;
-  }
+  return Boolean(fbId) || publishStatus === "published";
+}
 
-  const contentBody = String(
-    cp.caption || out.contentMarkdown || out.summary || ""
+function getPublishedContentText(t: TaskWithPayloads): string {
+  const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
+  const out = (t.output_payload ?? {}) as Record<string, unknown>;
+  const raw = String(
+    cp.caption || out.contentMarkdown || out.summary || t.title || ""
   ).trim();
+  return sanitizeCaptionText(raw, t.title);
+}
 
-  const hasMediaAsset = Boolean(
-    String(cp.photoUrl ?? "").trim() || String(cp.videoUrl ?? "").trim()
-  );
-
-  if (!contentBody && !hasMediaAsset) {
-    return false;
-  }
-
-  const looksLikeRawTaskPlan =
-    /^\s*(1\.\s*\[[^\]]+\]|berikan daftar\s+\d+\s+konsep|mengumpulkan data,\s*referensi)/i.test(
-      contentBody
-    );
-
-  return !looksLikeRawTaskPlan || hasMediaAsset;
+function formatDivisionLabel(div: Exclude<DivisionFilterKey, "all">): string {
+  if (div === "reels") return "Reels";
+  if (div === "photo") return "Foto";
+  if (div === "story") return "Story";
+  return "Teks";
 }
 
 export function StudioModulesWorkspace({
@@ -336,7 +272,7 @@ export function StudioModulesWorkspace({
 }: {
   moduleKey: StudioModuleKey;
 }) {
-  const todayDateCode = useMemo(() => getTodayDateCodeWib(), []);
+  const todayDateCode = useMemo(() => getDateCodeWib(), []);
   const [projects, setProjects] = useState<DbProject[]>([]);
   const [selectedProject, setSelectedProject] = useState<string>("");
   const [authReady, setAuthReady] = useState<boolean>(false);
@@ -351,24 +287,9 @@ export function StudioModulesWorkspace({
     perAgent: {},
   });
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
-  const [publishItems, setPublishItems] = useState<
-    Record<string, PublishItemState>
-  >({});
-  const [activeFormatTabs, setActiveFormatTabs] = useState<
-    Record<string, FormatTabKey>
-  >({});
   const [divisionFilter, setDivisionFilter] =
     useState<DivisionFilterKey>("all");
-  const [showAllCompleted, setShowAllCompleted] = useState(false);
-  const [photoPrompts, setPhotoPrompts] = useState<Record<string, string>>({});
-  const [generatingPhotoTaskId, setGeneratingPhotoTaskId] = useState<
-    string | null
-  >(null);
-  const [dailySlots, setDailySlots] = useState<DailyScheduleSlot[]>(() =>
-    buildDefaultDailySlots(getTodayDateCodeWib())
-  );
-  const [runningSlotId, setRunningSlotId] = useState<string | null>(null);
-  const [runningAllSlots, setRunningAllSlots] = useState(false);
+  const [showAllPublished, setShowAllPublished] = useState(false);
   const [fbPageId, setFbPageId] = useState("");
   const [fbAccessToken, setFbAccessToken] = useState("");
   const [hasSavedFbCreds, setHasSavedFbCreds] = useState(false);
@@ -377,13 +298,6 @@ export function StudioModulesWorkspace({
     ok: boolean;
     message: string;
   } | null>(null);
-  const [publishingTaskId, setPublishingTaskId] = useState<string | null>(null);
-  const [runningAutoTaskId, setRunningAutoTaskId] = useState<string | null>(
-    null
-  );
-  const [publishFeedback, setPublishFeedback] = useState<
-    Record<string, { ok: boolean; message: string }>
-  >({});
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -632,536 +546,82 @@ export function StudioModulesWorkspace({
     }
   };
 
-  const executeSingleDailySlot = async (slot: DailyScheduleSlot) => {
-    setRunningSlotId(slot.id);
-    const nowStr = new Date().toLocaleTimeString("id-ID", {
-      hour: "2-digit",
-      minute: "2-digit",
+  const dailySlots = useMemo<DailyScheduleSlot[]>(() => {
+    const baseSlots = buildDefaultDailySlots(todayDateCode);
+    const todayTasks = tasks.filter((t) => {
+      const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
+      const refDate = cp.publishedAt
+        ? new Date(String(cp.publishedAt))
+        : new Date(t.created_at);
+      return getDateCodeWib(refDate) === todayDateCode;
     });
 
-    try {
-      const mappedPublishType =
-        slot.kind === "reels"
-          ? "reels"
-          : slot.kind === "photo" || slot.kind === "story"
-          ? "photo"
-          : "text";
-
-      const res = await fetch("/api/publish/facebook", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          projectId: selectedProject || null,
-          pageId: fbPageId,
-          accessToken: fbAccessToken,
-          publishType: mappedPublishType,
-          slotKind: slot.kind,
-          caption: sanitizeCaptionText(slot.caption, slot.title),
-          photoUrl:
-            slot.kind === "photo" || slot.kind === "story"
-              ? slot.mediaUrl || ""
-              : "",
-          videoUrl: slot.kind === "reels" ? slot.mediaUrl || "" : "",
-        }),
-      });
-
-      const data = (await res.json()) as {
-        ok?: boolean;
-        postId?: string;
-        error?: string;
-      };
-
-      if (!res.ok || !data.ok) {
-        setDailySlots((prev) =>
-          prev.map((item) =>
-            item.id === slot.id
-              ? {
-                  ...item,
-                  status: "failed",
-                  statusNote: data.error || "Gagal posting",
-                  lastRunAt: `${nowStr} WIB`,
-                }
-              : item
-          )
-        );
-        return;
-      }
-
-      setDailySlots((prev) =>
-        prev.map((item) =>
-          item.id === slot.id
-            ? {
-                ...item,
-                status: "success",
-                statusNote: data.postId
-                  ? `Sukses posting (ID: ${data.postId})`
-                  : "Sukses posting",
-                lastRunAt: `${nowStr} WIB`,
-              }
-            : item
-        )
+    return baseSlots.map((slot) => {
+      const matchedTask = todayTasks.find(
+        (t) => inferTaskDivision(t) === slot.kind
       );
-    } catch (err) {
-      setDailySlots((prev) =>
-        prev.map((item) =>
-          item.id === slot.id
-            ? {
-                ...item,
-                status: "failed",
-                statusNote:
-                  err instanceof Error ? err.message : "Gagal koneksi jaringan",
-                lastRunAt: `${nowStr} WIB`,
-              }
-            : item
-        )
-      );
-    } finally {
-      setRunningSlotId(null);
-    }
-  };
+      if (!matchedTask) return slot;
 
-  const handleRunAllDailySlots = async () => {
-    if (runningAllSlots || runningSlotId) return;
-    setRunningAllSlots(true);
-    try {
-      for (const slot of dailySlots) {
-        await executeSingleDailySlot(slot);
+      const cp = (matchedTask.checkpoint_state ?? {}) as Record<
+        string,
+        unknown
+      >;
+      const out = (matchedTask.output_payload ?? {}) as Record<string, unknown>;
+      const fbId = extractFbPostId(matchedTask);
+      const publishStatus = String(
+        cp.publishStatus ?? out.publishStatus ?? ""
+      ).toLowerCase();
+      const publishError = String(
+        cp.publishError ?? out.publishError ?? ""
+      ).trim();
+      const contentPreview = getPublishedContentText(matchedTask);
+
+      if (fbId || publishStatus === "published") {
+        const publishedTime = cp.publishedAt
+          ? new Date(String(cp.publishedAt)).toLocaleTimeString("id-ID", {
+              timeZone: "Asia/Jakarta",
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          : "";
+        return {
+          ...slot,
+          caption: contentPreview,
+          status: "success",
+          statusNote: fbId ? `Sukses posting (ID: ${fbId})` : "Sukses posting",
+          lastRunAt: publishedTime ? `${publishedTime} WIB` : undefined,
+        };
       }
-    } finally {
-      setRunningAllSlots(false);
-    }
-  };
 
-  const getPublishItemState = (t: TaskWithPayloads): PublishItemState => {
-    if (publishItems[t.id]) return publishItems[t.id];
-    const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
-    const inferredDiv = inferTaskDivision(t);
-    const fallbackType: "reels" | "photo" | "text" =
-      inferredDiv === "reels"
-        ? "reels"
-        : inferredDiv === "photo" || inferredDiv === "story"
-        ? "photo"
-        : "text";
-    const cpType =
-      cp.publishType === "reels" ||
-      cp.publishType === "photo" ||
-      cp.publishType === "text"
-        ? cp.publishType
-        : fallbackType;
+      if (publishStatus === "failed" || publishError) {
+        return {
+          ...slot,
+          caption: contentPreview,
+          status: "failed",
+          statusNote: publishError || "Gagal posting",
+        };
+      }
 
-    const unifiedCaption = composeUnifiedTextDeliverable(t, tasks);
-
-    return {
-      publishType: cpType,
-      videoUrl: String(cp.videoUrl ?? ""),
-      photoUrl: String(cp.photoUrl ?? ""),
-      caption: unifiedCaption,
-      autoPublishOnRender: Boolean(cp.autoPublishFacebook ?? true),
-    };
-  };
-
-  const getActiveTab = (
-    t: TaskWithPayloads,
-    item: PublishItemState
-  ): FormatTabKey => {
-    if (activeFormatTabs[t.id]) return activeFormatTabs[t.id];
-    if (item.publishType === "photo") return "photo";
-    if (item.publishType === "reels") return "video";
-    return "text";
-  };
-
-  const selectFormatTab = (
-    t: TaskWithPayloads,
-    item: PublishItemState,
-    tab: FormatTabKey
-  ) => {
-    setActiveFormatTabs((prev) => ({ ...prev, [t.id]: tab }));
-    const mappedType: "reels" | "photo" | "text" =
-      tab === "video" ? "reels" : tab;
-    updatePublishItemState(t.id, item, { publishType: mappedType });
-  };
-
-  const getPhotoPrompt = (
-    t: TaskWithPayloads,
-    item: PublishItemState
-  ): string => {
-    if (photoPrompts[t.id] !== undefined) return photoPrompts[t.id];
-    const out = (t.output_payload ?? {}) as Record<string, unknown>;
-    const payload = (t.input_payload ?? {}) as Record<string, unknown>;
-    const rawPrompt = String(
-      payload.imagePrompt || out.visualPrompt || item.caption || t.title
-    ).trim();
-    return rawPrompt.slice(0, 600);
-  };
-
-  const updatePublishItemState = (
-    taskId: string,
-    base: PublishItemState,
-    patch: Partial<PublishItemState>
-  ) => {
-    setPublishItems((prev) => ({
-      ...prev,
-      [taskId]: { ...base, ...patch },
-    }));
-  };
-
-  const handleGeneratePhoto = async (
-    t: TaskWithPayloads,
-    item: PublishItemState
-  ) => {
-    if (generatingPhotoTaskId || runningAutoTaskId || publishingTaskId) return;
-    const promptValue = getPhotoPrompt(t, item).trim();
-    if (!promptValue) {
-      setPublishFeedback((prev) => ({
-        ...prev,
-        [t.id]: {
-          ok: false,
-          message: "Isi prompt gambar terlebih dahulu sebelum generate foto.",
-        },
-      }));
-      return;
-    }
-
-    setGeneratingPhotoTaskId(t.id);
-    setPublishFeedback((prev) => {
-      const copy = { ...prev };
-      delete copy[t.id];
-      return copy;
-    });
-
-    try {
-      const res = await fetch("/api/media/generate-image", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: promptValue,
-          taskId: t.id,
-          filePrefix: `task-${t.id.slice(0, 8)}`,
-        }),
-      });
-
-      const data = (await res.json()) as {
-        ok?: boolean;
-        imageUrl?: string;
-        error?: string;
+      return {
+        ...slot,
+        caption: contentPreview,
       };
-
-      if (!res.ok || !data.ok || !data.imageUrl) {
-        setPublishFeedback((prev) => ({
-          ...prev,
-          [t.id]: {
-            ok: false,
-            message:
-              data.error ||
-              "Gagal membuat gambar melalui /api/media/generate-image.",
-          },
-        }));
-        return;
-      }
-
-      const nextItem: PublishItemState = {
-        ...item,
-        publishType: "photo",
-        photoUrl: data.imageUrl,
-      };
-      setPublishItems((prev) => ({ ...prev, [t.id]: nextItem }));
-      setActiveFormatTabs((prev) => ({ ...prev, [t.id]: "photo" }));
-
-      const supabase = createSupabaseBrowserClient();
-      const prevCp =
-        t.checkpoint_state && typeof t.checkpoint_state === "object"
-          ? (t.checkpoint_state as Record<string, unknown>)
-          : {};
-
-      await supabase
-        .from("tasks")
-        .update({
-          checkpoint_state: {
-            ...prevCp,
-            publishType: "photo",
-            photoUrl: data.imageUrl,
-            caption: sanitizeCaptionText(item.caption, t.title),
-          },
-        })
-        .eq("id", t.id);
-
-      setPublishFeedback((prev) => ({
-        ...prev,
-        [t.id]: {
-          ok: true,
-          message:
-            "Gambar berhasil dibuat & tersimpan ke Storage. Siap diposting ke Facebook.",
-        },
-      }));
-    } catch (err) {
-      setPublishFeedback((prev) => ({
-        ...prev,
-        [t.id]: {
-          ok: false,
-          message:
-            err instanceof Error
-              ? err.message
-              : "Gagal memanggil endpoint generate gambar.",
-        },
-      }));
-    } finally {
-      setGeneratingPhotoTaskId(null);
-    }
-  };
-
-  const handleToggleAutoPublishOnRender = async (
-    t: TaskWithPayloads,
-    item: PublishItemState
-  ) => {
-    const nextAuto = !item.autoPublishOnRender;
-    const cleanCaption = sanitizeCaptionText(item.caption, t.title);
-    updatePublishItemState(t.id, item, {
-      autoPublishOnRender: nextAuto,
-      caption: cleanCaption,
     });
-
-    try {
-      const supabase = createSupabaseBrowserClient();
-      const prevCp =
-        t.checkpoint_state && typeof t.checkpoint_state === "object"
-          ? (t.checkpoint_state as Record<string, unknown>)
-          : {};
-
-      await supabase
-        .from("tasks")
-        .update({
-          checkpoint_state: {
-            ...prevCp,
-            autoPublishFacebook: nextAuto,
-            publishType: item.publishType,
-            videoUrl: item.videoUrl,
-            photoUrl: item.photoUrl,
-            caption: cleanCaption,
-          },
-        })
-        .eq("id", t.id);
-
-      setPublishFeedback((prev) => ({
-        ...prev,
-        [t.id]: {
-          ok: true,
-          message: nextAuto
-            ? "Mode otomatis aktif: saat render selesai atau dijalankan, posting ke Facebook berjalan otomatis."
-            : "Mode otomatis dimatikan untuk tugas ini.",
-        },
-      }));
-    } catch {
-      // Abaikan error pembaruan sakelar
-    }
-  };
-
-  const handleRunAutomatedPipelineFromApp = async (
-    t: TaskWithPayloads,
-    item: PublishItemState
-  ) => {
-    if (runningAutoTaskId || publishingTaskId) return;
-    setRunningAutoTaskId(t.id);
-    setPublishFeedback((prev) => {
-      const copy = { ...prev };
-      delete copy[t.id];
-      return copy;
-    });
-
-    const activeItem = publishItems[t.id] ?? item;
-    const cleanCaption = sanitizeCaptionText(activeItem.caption, t.title);
-
-    try {
-      const supabase = createSupabaseBrowserClient();
-      const prevCp =
-        t.checkpoint_state && typeof t.checkpoint_state === "object"
-          ? (t.checkpoint_state as Record<string, unknown>)
-          : {};
-
-      await supabase
-        .from("tasks")
-        .update({
-          checkpoint_state: {
-            ...prevCp,
-            renderStatus: "completed",
-            renderedAt: new Date().toISOString(),
-            autoPublishFacebook: activeItem.autoPublishOnRender,
-            publishType: activeItem.publishType,
-            videoUrl: activeItem.videoUrl,
-            photoUrl: activeItem.photoUrl,
-            caption: cleanCaption,
-          },
-        })
-        .eq("id", t.id);
-
-      if (!activeItem.autoPublishOnRender) {
-        setPublishFeedback((prev) => ({
-          ...prev,
-          [t.id]: {
-            ok: true,
-            message:
-              "Data render tersimpan (Render Selesai). Aktifkan Auto ON atau klik Posting ke FB untuk mempublikasikan.",
-          },
-        }));
-        await loadData(selectedProject);
-        return;
-      }
-
-      const res = await fetch("/api/publish/facebook", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          projectId: t.project_id || selectedProject || null,
-          taskId: t.id,
-          pageId: fbPageId,
-          accessToken: fbAccessToken,
-          publishType: activeItem.publishType,
-          caption: cleanCaption,
-          videoUrl: activeItem.videoUrl,
-          photoUrl: activeItem.photoUrl,
-          saveCredentials: Boolean(fbPageId && fbAccessToken),
-        }),
-      });
-
-      const data = (await res.json()) as {
-        ok?: boolean;
-        postId?: string;
-        error?: string;
-      };
-
-      if (!res.ok || !data.ok) {
-        setPublishFeedback((prev) => ({
-          ...prev,
-          [t.id]: {
-            ok: false,
-            message:
-              data.error || "Alur otomatis gagal memposting ke Facebook Page.",
-          },
-        }));
-        return;
-      }
-
-      if (fbPageId && fbAccessToken) {
-        setHasSavedFbCreds(true);
-        setFbAccessToken("");
-      }
-
-      setPublishFeedback((prev) => ({
-        ...prev,
-        [t.id]: {
-          ok: true,
-          message: `Alur otomatis sukses: render dicatat & diposting ke Facebook Page (ID: ${data.postId})`,
-        },
-      }));
-      await loadData(selectedProject);
-    } catch (err) {
-      setPublishFeedback((prev) => ({
-        ...prev,
-        [t.id]: {
-          ok: false,
-          message:
-            err instanceof Error
-              ? err.message
-              : "Gagal menjalankan alur otomatis dari aplikasi.",
-        },
-      }));
-    } finally {
-      setRunningAutoTaskId(null);
-    }
-  };
-
-  const handleFacebookAutoPost = async (
-    t: TaskWithPayloads,
-    overrideType?: "reels" | "photo" | "text"
-  ) => {
-    if (publishingTaskId || runningAutoTaskId) return;
-    const baseItem = publishItems[t.id] ?? getPublishItemState(t);
-    const effectiveType = overrideType ?? baseItem.publishType;
-    const cleanCaption = sanitizeCaptionText(baseItem.caption, t.title);
-    setPublishingTaskId(t.id);
-    setPublishFeedback((prev) => {
-      const copy = { ...prev };
-      delete copy[t.id];
-      return copy;
-    });
-
-    try {
-      const res = await fetch("/api/publish/facebook", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          projectId: t.project_id || selectedProject || null,
-          taskId: t.id,
-          pageId: fbPageId,
-          accessToken: fbAccessToken,
-          publishType: effectiveType,
-          caption: cleanCaption,
-          videoUrl: baseItem.videoUrl,
-          photoUrl: baseItem.photoUrl,
-          saveCredentials: Boolean(fbPageId && fbAccessToken),
-        }),
-      });
-
-      const data = (await res.json()) as {
-        ok?: boolean;
-        postId?: string;
-        error?: string;
-      };
-
-      if (!res.ok || !data.ok) {
-        setPublishFeedback((prev) => ({
-          ...prev,
-          [t.id]: {
-            ok: false,
-            message: data.error || "Gagal mempublikasikan ke Facebook Page.",
-          },
-        }));
-        return;
-      }
-
-      if (fbPageId && fbAccessToken) {
-        setHasSavedFbCreds(true);
-        setFbAccessToken("");
-      }
-
-      setPublishFeedback((prev) => ({
-        ...prev,
-        [t.id]: {
-          ok: true,
-          message: `Berhasil dipublikasikan ke Facebook Page (ID: ${data.postId})`,
-        },
-      }));
-      await loadData(selectedProject);
-    } catch (err) {
-      setPublishFeedback((prev) => ({
-        ...prev,
-        [t.id]: {
-          ok: false,
-          message:
-            err instanceof Error
-              ? err.message
-              : "Koneksi gagal saat menghubungi API Facebook.",
-        },
-      }));
-    } finally {
-      setPublishingTaskId(null);
-    }
-  };
+  }, [tasks, todayDateCode]);
 
   const completedTasks = tasks.filter((t) => t.status === "completed");
-  const finishedDeliverables = useMemo(
-    () => tasks.filter((t) => isFinishedDeliverableTask(t)),
+  const publishedTasks = useMemo(
+    () => tasks.filter((t) => isPublishedToFacebook(t)),
     [tasks]
   );
 
-  const filteredCompletedTasks = useMemo(() => {
+  const filteredPublishedTasks = useMemo(() => {
     const base =
       divisionFilter === "all"
-        ? finishedDeliverables
-        : finishedDeliverables.filter(
-            (t) => inferTaskDivision(t) === divisionFilter
-          );
-    return showAllCompleted ? base : base.slice(0, 3);
-  }, [finishedDeliverables, divisionFilter, showAllCompleted]);
+        ? publishedTasks
+        : publishedTasks.filter((t) => inferTaskDivision(t) === divisionFilter);
+    return showAllPublished ? base : base.slice(0, 5);
+  }, [publishedTasks, divisionFilter, showAllPublished]);
 
   const totalInputTokens = usageLogs.reduce(
     (acc, u) => acc + Number(u.input_tokens ?? 0),
@@ -1437,86 +897,65 @@ export function StudioModulesWorkspace({
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h2 className="text-base font-semibold">
-                  Ceklis Jadwal Posting Harian (Tanggal {todayDateCode})
+                  Jadwal Posting Harian Otomatis (Tanggal {todayDateCode})
                 </h2>
                 <p className="text-xs text-slate-400">
-                  Asisten menjalankan slot harian sesuai jam: centang hijau (✓)
-                  bila sukses posting dan silang merah (✕) bila gagal posting.
+                  Berjalan otomatis sesuai jadwal WIB melalui cron harian;
+                  centang hijau (✓) bila sukses tayang dan silang merah (✕) bila
+                  gagal.
                 </p>
               </div>
-
-              <button
-                type="button"
-                disabled={runningAllSlots || Boolean(runningSlotId)}
-                onClick={() => void handleRunAllDailySlots()}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
-              >
-                <Play className="h-3.5 w-3.5" />
-                <span>
-                  {runningAllSlots
-                    ? "Menjalankan Jadwal..."
-                    : "Jalankan Semua Slot Hari Ini"}
-                </span>
-              </button>
+              <Badge variant="blue">Auto-Schedule WIB</Badge>
             </div>
 
             <div className="space-y-2">
-              {dailySlots.map((slot) => {
-                const isRunningThis = runningSlotId === slot.id;
-                return (
-                  <div
-                    key={slot.id}
-                    className="rounded-xl border border-slate-700/60 bg-slate-900/70 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
-                  >
-                    <div className="space-y-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="rounded bg-slate-800 px-2 py-0.5 font-mono text-[11px] text-blue-300">
-                          {slot.dateCode} • {slot.timeLabel}
-                        </span>
-                        <span className="font-semibold text-slate-100">
-                          {slot.title}
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-slate-400 truncate">
-                        {slot.caption}
-                      </p>
+              {dailySlots.map((slot) => (
+                <div
+                  key={slot.id}
+                  className="rounded-xl border border-slate-700/60 bg-slate-900/70 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                >
+                  <div className="space-y-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="rounded bg-slate-800 px-2 py-0.5 font-mono text-[11px] text-blue-300">
+                        {slot.dateCode} • {slot.timeLabel} WIB
+                      </span>
+                      <span className="font-semibold text-slate-100">
+                        {slot.title}
+                      </span>
                     </div>
-
-                    <div className="flex items-center gap-2.5 shrink-0 flex-wrap">
-                      {slot.status === "success" ? (
-                        <span className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
-                          <Check className="h-3.5 w-3.5" />
-                          <span>
-                            {slot.statusNote || "Sukses posting"}
-                            {slot.lastRunAt ? ` (${slot.lastRunAt})` : ""}
-                          </span>
-                        </span>
-                      ) : slot.status === "failed" ? (
-                        <span className="inline-flex items-center gap-1 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2.5 py-1 text-[11px] font-semibold text-rose-300">
-                          <X className="h-3.5 w-3.5" />
-                          <span>
-                            {slot.statusNote
-                              ? `Gagal posting: ${slot.statusNote}`
-                              : "Gagal posting"}
-                            {slot.lastRunAt ? ` (${slot.lastRunAt})` : ""}
-                          </span>
-                        </span>
-                      ) : (
-                        <Badge variant="amber">Menunggu Jadwal</Badge>
-                      )}
-
-                      <button
-                        type="button"
-                        disabled={isRunningThis || runningAllSlots}
-                        onClick={() => void executeSingleDailySlot(slot)}
-                        className="rounded-lg border border-blue-500/40 bg-blue-600/20 px-2.5 py-1 text-[11px] font-semibold text-blue-200 hover:bg-blue-600/30 disabled:opacity-50"
-                      >
-                        {isRunningThis ? "Memproses..." : "Jalankan Slot"}
-                      </button>
-                    </div>
+                    <p className="text-[11px] text-slate-400 truncate">
+                      {slot.caption}
+                    </p>
                   </div>
-                );
-              })}
+
+                  <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                    {slot.status === "success" ? (
+                      <span className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
+                        <Check className="h-3.5 w-3.5" />
+                        <span>
+                          {slot.statusNote || "Sukses posting"}
+                          {slot.lastRunAt ? ` (${slot.lastRunAt})` : ""}
+                        </span>
+                      </span>
+                    ) : slot.status === "failed" ? (
+                      <span className="inline-flex items-center gap-1 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2.5 py-1 text-[11px] font-semibold text-rose-300">
+                        <X className="h-3.5 w-3.5" />
+                        <span>
+                          {slot.statusNote
+                            ? `Gagal posting: ${slot.statusNote}`
+                            : "Gagal posting"}
+                          {slot.lastRunAt ? ` (${slot.lastRunAt})` : ""}
+                        </span>
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] font-medium text-amber-300">
+                        <Clock className="h-3 w-3" />
+                        <span>Menunggu Jadwal</span>
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
 
@@ -1531,41 +970,58 @@ export function StudioModulesWorkspace({
               <Badge variant="emerald">Terhubung ke Tasks</Badge>
             </div>
 
-            <div className="space-y-2">
-              {tasks.map((t) => {
-                const payload = (t.input_payload ?? {}) as Record<
-                  string,
-                  unknown
-                >;
-                const stepOrder = Number(payload.stepOrder ?? t.step_order ?? 1);
-                return (
-                  <div
-                    key={t.id}
-                    className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
-                  >
-                    <div>
-                      <p className="font-semibold">
-                        #{stepOrder} • {t.title}
-                      </p>
-                      <p className="text-[11px] text-slate-400">
-                        Target: {String(payload.estimatedOutput || "Artefak")} •
-                        Dibuat:{" "}
-                        {new Date(t.created_at).toLocaleDateString("id-ID", {
-                          day: "2-digit",
-                          month: "short",
-                          year: "numeric",
-                        })}
-                      </p>
-                    </div>
-                    <Badge
-                      variant={t.status === "completed" ? "emerald" : "amber"}
+            {tasks.length === 0 ? (
+              <p className="text-xs text-slate-400">
+                Belum ada antrean tugas produksi untuk proyek ini.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {tasks.map((t) => {
+                  const payload = (t.input_payload ?? {}) as Record<
+                    string,
+                    unknown
+                  >;
+                  const stepOrder = Number(
+                    payload.stepOrder ?? t.step_order ?? 1
+                  );
+                  const isPublished = isPublishedToFacebook(t);
+                  return (
+                    <div
+                      key={t.id}
+                      className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
                     >
-                      {t.status}
-                    </Badge>
-                  </div>
-                );
-              })}
-            </div>
+                      <div>
+                        <p className="font-semibold">
+                          #{stepOrder} • {t.title}
+                        </p>
+                        <p className="text-[11px] text-slate-400">
+                          Target:{" "}
+                          {String(payload.estimatedOutput || "Artefak")} •
+                          Dibuat:{" "}
+                          {new Date(t.created_at).toLocaleDateString("id-ID", {
+                            day: "2-digit",
+                            month: "short",
+                            year: "numeric",
+                          })}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        {isPublished && (
+                          <Badge variant="blue">Sudah Tayang FB</Badge>
+                        )}
+                        <Badge
+                          variant={
+                            t.status === "completed" ? "emerald" : "amber"
+                          }
+                        >
+                          {t.status}
+                        </Badge>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       ) : moduleKey === "publishing" ? (
@@ -1574,11 +1030,11 @@ export function StudioModulesWorkspace({
             <div className="flex items-center justify-between flex-wrap gap-2">
               <div>
                 <h2 className="text-base font-semibold">
-                  Koneksi Facebook Page Graph API & Otomatisasi App
+                  Koneksi Facebook Page Graph API
                 </h2>
                 <p className="text-xs text-slate-400">
-                  Simpan kredensial halaman lalu rilis barang jadi Teks, Foto,
-                  Story, atau Reels ke Facebook Page.
+                  Kredensial halaman yang digunakan oleh penjadwalan otomatis
+                  saat mempublikasikan konten ke Facebook Page.
                 </p>
               </div>
               <Badge variant={hasSavedFbCreds ? "emerald" : "amber"}>
@@ -1657,30 +1113,30 @@ export function StudioModulesWorkspace({
           <div className="glass-panel rounded-2xl p-4 sm:p-5 space-y-3.5">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <Send className="h-5 w-5 text-purple-400" />
+                <Send className="h-5 w-5 text-emerald-400" />
                 <div>
                   <h2 className="text-base font-semibold">
-                    Publishing Center — Barang Jadi Siap Rilis (
-                    {finishedDeliverables.length} Item)
+                    Publishing Center — Arsip Tayang Facebook (
+                    {publishedTasks.length} Item)
                   </h2>
                   <p className="text-[11px] text-slate-400">
-                    Menampilkan hasil akhir konten yang siap diposting per
-                    divisi (langkah riset/ide mentah disembunyikan).
+                    Menampilkan konten yang telah berhasil diposting ke Facebook
+                    Page melalui jadwal otomatis.
                   </p>
                 </div>
               </div>
 
               <div className="flex items-center gap-2 flex-wrap">
-                <Badge variant="purple">Teks • Foto • Story • Reels</Badge>
-                {finishedDeliverables.length > 3 && (
+                <Badge variant="emerald">Sudah Tayang FB</Badge>
+                {publishedTasks.length > 5 && (
                   <button
                     type="button"
-                    onClick={() => setShowAllCompleted((prev) => !prev)}
+                    onClick={() => setShowAllPublished((prev) => !prev)}
                     className="rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-700"
                   >
-                    {showAllCompleted
-                      ? "Ringkas (3 Item)"
-                      : `Lihat Semua (${finishedDeliverables.length})`}
+                    {showAllPublished
+                      ? "Ringkas (5 Item)"
+                      : `Lihat Semua (${publishedTasks.length})`}
                   </button>
                 )}
               </div>
@@ -1711,27 +1167,28 @@ export function StudioModulesWorkspace({
               ))}
             </div>
 
-            {filteredCompletedTasks.length === 0 ? (
+            {filteredPublishedTasks.length === 0 ? (
               <p className="text-xs text-slate-400">
-                Belum ada barang jadi untuk filter ini. Selesaikan tugas output
-                (Teks, Foto, Story, atau Reels) di AI Command Center terlebih
-                dahulu.
+                Belum ada konten yang berhasil dipublikasikan ke Facebook untuk
+                filter ini. Konten siap tayang di Content Studio akan otomatis
+                masuk ke arsip ini setelah dijadwalkan dan diposting oleh
+                Content Planner.
               </p>
             ) : (
               <div className="space-y-3">
-                {filteredCompletedTasks.map((t) => {
-                  const item = publishItems[t.id] ?? getPublishItemState(t);
-                  const currentTab = getActiveTab(t, item);
-                  const feedback = publishFeedback[t.id];
-                  const isPublishingThis = publishingTaskId === t.id;
-                  const isRunningAutoThis = runningAutoTaskId === t.id;
-                  const isGeneratingPhotoThis = generatingPhotoTaskId === t.id;
+                {filteredPublishedTasks.map((t) => {
                   const cp = (t.checkpoint_state ?? {}) as Record<
                     string,
                     unknown
                   >;
-                  const publishedId = String(cp.facebookPostId ?? "");
-                  const renderStatus = String(cp.renderStatus ?? "");
+                  const postId = extractFbPostId(t);
+                  const contentText = getPublishedContentText(t);
+                  const photoUrl = String(cp.photoUrl ?? "").trim();
+                  const videoUrl = String(cp.videoUrl ?? "").trim();
+                  const division = inferTaskDivision(t);
+                  const publishedAtRaw = cp.publishedAt
+                    ? String(cp.publishedAt)
+                    : t.created_at;
 
                   return (
                     <div
@@ -1741,321 +1198,111 @@ export function StudioModulesWorkspace({
                       <div className="flex flex-wrap items-start justify-between gap-2">
                         <div className="space-y-1 min-w-0 flex-1">
                           <div className="flex items-center gap-2 flex-wrap">
-                            <span className="font-semibold text-sm truncate">
+                            <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+                            <span className="font-semibold text-sm text-slate-100">
                               {t.title}
                             </span>
-                            <Badge variant="emerald">Barang Jadi</Badge>
-                            {renderStatus === "completed" && (
-                              <Badge variant="blue">Render Selesai</Badge>
-                            )}
+                            <Badge variant="emerald">Terpublikasi</Badge>
+                            <Badge variant="blue">
+                              {formatDivisionLabel(division)}
+                            </Badge>
                           </div>
+
                           <div className="flex items-center gap-2 flex-wrap text-[11px] text-slate-400">
-                            <code className="rounded bg-slate-800 px-1.5 py-0.5 text-slate-200">
-                              #{t.id.slice(0, 8)}
-                            </code>
-                            <button
-                              type="button"
-                              onClick={() => handleCopyText(`id-${t.id}`, t.id)}
-                              className="inline-flex items-center gap-1 text-blue-400 hover:underline"
-                            >
-                              {copiedKey === `id-${t.id}` ? (
-                                <>
-                                  <Check className="h-3 w-3 text-emerald-400" />
-                                  <span>ID Tersalin</span>
-                                </>
-                              ) : (
-                                <>
-                                  <Copy className="h-3 w-3" />
-                                  <span>Salin ID</span>
-                                </>
-                              )}
-                            </button>
-                            {publishedId && (
-                              <span className="text-emerald-400">
-                                • FB ID: {publishedId}
+                            <span>
+                              Tayang:{" "}
+                              {new Date(publishedAtRaw).toLocaleString("id-ID", {
+                                timeZone: "Asia/Jakarta",
+                                day: "2-digit",
+                                month: "short",
+                                year: "numeric",
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })}{" "}
+                              WIB
+                            </span>
+                            {postId && (
+                              <span className="font-mono text-emerald-300">
+                                • FB ID: {postId}
                               </span>
                             )}
                           </div>
                         </div>
 
                         <div className="flex items-center gap-1.5 flex-wrap">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleToggleAutoPublishOnRender(t, item)
-                            }
-                            className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium transition ${
-                              item.autoPublishOnRender
-                                ? "border-amber-500/50 bg-amber-500/20 text-amber-200"
-                                : "border-slate-700 bg-slate-800/70 text-slate-400 hover:text-slate-200"
-                            }`}
-                          >
-                            <Zap className="h-3 w-3" />
-                            <span>
-                              {item.autoPublishOnRender ? "Auto ON" : "Auto OFF"}
-                            </span>
-                          </button>
-
-                          <button
-                            type="button"
-                            disabled={
-                              isRunningAutoThis ||
-                              isPublishingThis ||
-                              isGeneratingPhotoThis
-                            }
-                            onClick={() =>
-                              handleRunAutomatedPipelineFromApp(t, item)
-                            }
-                            className="inline-flex items-center gap-1 rounded-lg bg-purple-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-purple-500 disabled:opacity-50"
-                          >
-                            <Play className="h-3 w-3" />
-                            <span>
-                              {isRunningAutoThis ? "Jalan..." : "Jalankan"}
-                            </span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => handleCopyText(t.id, item.caption)}
-                            className="inline-flex items-center gap-1 rounded-lg border border-slate-600/40 bg-slate-800/70 px-2 py-1 text-[11px] text-slate-200 hover:bg-slate-700/70"
-                          >
-                            {copiedKey === t.id ? (
-                              <Check className="h-3 w-3 text-emerald-400" />
-                            ) : (
-                              <Copy className="h-3 w-3 text-blue-400" />
-                            )}
-                            <span>Salin</span>
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="space-y-2.5 rounded-xl border border-slate-800 bg-slate-950/70 p-2.5">
-                        <div className="inline-flex flex-wrap gap-1 rounded-lg border border-slate-800 bg-slate-900/90 p-1">
-                          <button
-                            type="button"
-                            onClick={() => selectFormatTab(t, item, "text")}
-                            className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
-                              currentTab === "text"
-                                ? "bg-emerald-600 text-white"
-                                : "text-slate-400 hover:text-slate-200"
-                            }`}
-                          >
-                            <FileText className="h-3 w-3" />
-                            <span>Teks</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => selectFormatTab(t, item, "photo")}
-                            className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
-                              currentTab === "photo"
-                                ? "bg-blue-600 text-white"
-                                : "text-slate-400 hover:text-slate-200"
-                            }`}
-                          >
-                            <ImageIcon className="h-3 w-3" />
-                            <span>Foto</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => selectFormatTab(t, item, "video")}
-                            className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
-                              currentTab === "video"
-                                ? "bg-purple-600 text-white"
-                                : "text-slate-400 hover:text-slate-200"
-                            }`}
-                          >
-                            <Video className="h-3 w-3" />
-                            <span>Reels</span>
-                          </button>
-                        </div>
-
-                        {currentTab === "text" && (
-                          <div className="space-y-2">
-                            <textarea
-                              rows={6}
-                              value={item.caption}
-                              onChange={(e) =>
-                                updatePublishItemState(t.id, item, {
-                                  publishType: "text",
-                                  caption: e.target.value,
-                                })
-                              }
-                              className="w-full max-h-60 resize-y rounded-lg border border-slate-700 bg-slate-900/90 p-2.5 text-xs leading-relaxed text-slate-200"
-                            />
+                          {postId && (
                             <button
                               type="button"
-                              disabled={
-                                isPublishingThis ||
-                                isRunningAutoThis ||
-                                isGeneratingPhotoThis
-                              }
-                              onClick={() => {
-                                updatePublishItemState(t.id, item, {
-                                  publishType: "text",
-                                });
-                                void handleFacebookAutoPost(t, "text");
-                              }}
-                              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
+                              onClick={() => handleCopyText(`fb-${t.id}`, postId)}
+                              className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-[11px] text-slate-200 hover:bg-slate-700"
                             >
-                              <Send className="h-3 w-3" />
-                              <span>
-                                {isPublishingThis
-                                  ? "Memposting..."
-                                  : "Posting Teks ke FB"}
-                              </span>
-                            </button>
-                          </div>
-                        )}
-
-                        {currentTab === "photo" && (
-                          <div className="space-y-2">
-                            <textarea
-                              rows={2}
-                              value={getPhotoPrompt(t, item)}
-                              onChange={(e) =>
-                                setPhotoPrompts((prev) => ({
-                                  ...prev,
-                                  [t.id]: e.target.value,
-                                }))
-                              }
-                              className="w-full max-h-24 resize-none rounded-lg border border-slate-700 bg-slate-900/90 p-2 text-xs text-slate-200"
-                            />
-
-                            <div className="flex flex-wrap items-center gap-2">
-                              <button
-                                type="button"
-                                disabled={
-                                  isGeneratingPhotoThis ||
-                                  isPublishingThis ||
-                                  isRunningAutoThis
-                                }
-                                onClick={() =>
-                                  void handleGeneratePhoto(t, item)
-                                }
-                                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
-                              >
-                                <ImageIcon className="h-3 w-3" />
-                                <span>
-                                  {isGeneratingPhotoThis
-                                    ? "Generating..."
-                                    : "Generate Foto"}
-                                </span>
-                              </button>
-
-                              <button
-                                type="button"
-                                disabled={
-                                  !item.photoUrl.trim() ||
-                                  item.photoUrl.includes("...") ||
-                                  isPublishingThis ||
-                                  isRunningAutoThis ||
-                                  isGeneratingPhotoThis
-                                }
-                                onClick={() => {
-                                  updatePublishItemState(t.id, item, {
-                                    publishType: "photo",
-                                  });
-                                  void handleFacebookAutoPost(t, "photo");
-                                }}
-                                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
-                              >
-                                <Send className="h-3 w-3" />
-                                <span>
-                                  {isPublishingThis
-                                    ? "Memposting..."
-                                    : "Posting Foto ke FB"}
-                                </span>
-                              </button>
-                            </div>
-
-                            <input
-                              type="url"
-                              value={item.photoUrl}
-                              onChange={(e) =>
-                                updatePublishItemState(t.id, item, {
-                                  publishType: "photo",
-                                  photoUrl: e.target.value,
-                                })
-                              }
-                              placeholder="https://.../storage/v1/object/public/..."
-                              className="w-full rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-xs text-slate-200"
-                            />
-
-                            {item.photoUrl &&
-                              /^https?:\/\//i.test(item.photoUrl) &&
-                              !item.photoUrl.includes("...") && (
-                                <div className="overflow-hidden rounded-lg border border-slate-700 bg-slate-900 p-1.5">
-                                  <img
-                                    src={item.photoUrl}
-                                    alt={t.title}
-                                    className="max-h-48 w-full rounded object-cover"
-                                  />
-                                </div>
+                              {copiedKey === `fb-${t.id}` ? (
+                                <>
+                                  <Check className="h-3 w-3 text-emerald-400" />
+                                  <span>ID Tersalin</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="h-3 w-3 text-emerald-400" />
+                                  <span>Salin FB ID</span>
+                                </>
                               )}
-                          </div>
-                        )}
-
-                        {currentTab === "video" && (
-                          <div className="space-y-2">
-                            <input
-                              type="url"
-                              value={item.videoUrl}
-                              onChange={(e) =>
-                                updatePublishItemState(t.id, item, {
-                                  publishType: "reels",
-                                  videoUrl: e.target.value,
-                                })
-                              }
-                              placeholder="https://.../video-reels.mp4"
-                              className="w-full rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-xs text-slate-200"
-                            />
-
-                            <button
-                              type="button"
-                              disabled={
-                                !item.videoUrl.trim() ||
-                                item.videoUrl.includes("...") ||
-                                isPublishingThis ||
-                                isRunningAutoThis ||
-                                isGeneratingPhotoThis
-                              }
-                              onClick={() => {
-                                updatePublishItemState(t.id, item, {
-                                  publishType: "reels",
-                                });
-                                void handleFacebookAutoPost(t, "reels");
-                              }}
-                              className="inline-flex items-center gap-1.5 rounded-lg bg-purple-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-purple-500 disabled:opacity-50"
-                            >
-                              <Send className="h-3 w-3" />
-                              <span>
-                                {isPublishingThis
-                                  ? "Memposting..."
-                                  : "Posting Reels ke FB"}
-                              </span>
                             </button>
-                          </div>
-                        )}
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleCopyText(`txt-${t.id}`, contentText)
+                            }
+                            className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-[11px] text-slate-200 hover:bg-slate-700"
+                          >
+                            {copiedKey === `txt-${t.id}` ? (
+                              <>
+                                <Check className="h-3 w-3 text-emerald-400" />
+                                <span>Teks Tersalin</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="h-3 w-3 text-blue-400" />
+                                <span>Salin Teks</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
                       </div>
 
-                      {feedback && (
-                        <div
-                          className={`flex items-center gap-1.5 rounded-lg p-2 text-[11px] ${
-                            feedback.ok
-                              ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-                              : "border border-rose-500/30 bg-rose-500/10 text-rose-300"
-                          }`}
-                        >
-                          {feedback.ok ? (
-                            <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                          ) : (
-                            <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-                          )}
-                          <span>{feedback.message}</span>
-                        </div>
-                      )}
+                      <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3 text-xs leading-relaxed text-slate-200 whitespace-pre-line">
+                        {contentText}
+                      </div>
+
+                      {photoUrl &&
+                        /^https?:\/\//i.test(photoUrl) &&
+                        !photoUrl.includes("...") && (
+                          <div className="overflow-hidden rounded-lg border border-slate-800 bg-slate-950 p-1.5">
+                            <img
+                              src={photoUrl}
+                              alt={t.title}
+                              className="max-h-56 w-full rounded object-cover"
+                            />
+                          </div>
+                        )}
+
+                      {videoUrl &&
+                        /^https?:\/\//i.test(videoUrl) &&
+                        !videoUrl.includes("...") && (
+                          <div className="rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-[11px] text-slate-300 truncate">
+                            Video Reels:{" "}
+                            <a
+                              href={videoUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-purple-300 underline"
+                            >
+                              {videoUrl}
+                            </a>
+                          </div>
+                        )}
                     </div>
                   );
                 })}
