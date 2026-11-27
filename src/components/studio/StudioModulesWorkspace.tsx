@@ -167,6 +167,49 @@ function sanitizeCaptionText(raw: string, fallbackTitle: string): string {
   return cleaned || fallbackTitle;
 }
 
+function sanitizePlannerPureText(raw: string): string {
+  const lines = raw
+    .replace(/\\n/g, "\n")
+    .replace(/\\r/g, "")
+    .replace(/\*\*/g, "")
+    .split("\n")
+    .map((line) => line.trim());
+
+  const filtered = lines.filter((line) => {
+    if (!line) return true;
+    if (
+      /^(caption(\s+slot\s+\w+)?|hashtag(s)?|tagar|rekomendasi\s+jam\s+unggah|call\s*-\s*to\s*-\s*action|cta)\s*:/i.test(
+        line
+      )
+    ) {
+      return false;
+    }
+    const withoutTags = line.replace(/(?:^|\s)#[A-Za-z0-9_]+/g, "").trim();
+    if (!withoutTags && /#[A-Za-z0-9_]+/.test(line)) {
+      return false;
+    }
+    return true;
+  });
+
+  return filtered
+    .map((line) => line.replace(/\s+#[A-Za-z0-9_]+/g, "").trim())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function formatPlannerContentByKind(
+  kind: DailySlotKind,
+  raw: string,
+  fallbackTitle: string
+): string {
+  const cleaned = sanitizeCaptionText(raw, fallbackTitle);
+  if (kind === "text" || kind === "story") {
+    return sanitizePlannerPureText(cleaned) || cleaned;
+  }
+  return cleaned;
+}
+
 function inferTaskDivision(
   t: TaskWithPayloads
 ): Exclude<DivisionFilterKey, "all"> {
@@ -708,8 +751,14 @@ export function StudioModulesWorkspace({
         const publishError = String(
           cp.publishError ?? out.publishError ?? ""
         ).trim();
-        const contentPreview =
-          getPublishedContentText(matchedTask) || meta.defaultCaption;
+        const rawContent = String(
+          cp.caption || out.contentMarkdown || out.summary || meta.defaultCaption
+        ).trim();
+        const contentPreview = formatPlannerContentByKind(
+          kind,
+          rawContent,
+          meta.defaultCaption
+        );
 
         let status: DailySlotCheckStatus = "pending";
         let statusNote: string | undefined;
@@ -1184,9 +1233,16 @@ export function StudioModulesWorkspace({
                           {slot.title}
                         </span>
                       </div>
-                      <p className="text-[11px] text-slate-400 truncate">
+                      <p className="text-[11px] text-slate-400 whitespace-pre-line">
                         {slot.caption}
                       </p>
+                      {slot.mediaUrl &&
+                        /^https?:\/\//i.test(slot.mediaUrl) &&
+                        !slot.mediaUrl.includes("...") && (
+                          <p className="text-[10px] text-indigo-300 truncate">
+                            Media: {slot.mediaUrl}
+                          </p>
+                        )}
                     </div>
 
                     <div className="flex items-center gap-2 shrink-0 flex-wrap">
@@ -1485,7 +1541,7 @@ export function StudioModulesWorkspace({
                             </span>
                             {postId && (
                               <span className="font-mono text-emerald-300">
-                                • FB ID: {postId}
+- FB ID: {postId}
                               </span>
                             )}
                           </div>
