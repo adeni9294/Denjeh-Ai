@@ -30,8 +30,8 @@ function getWibHourMinute(date = new Date()): {
 }
 
 function getSupabaseAdminClient() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const url = (process.env.NEXT_PUBLIC_SUPABASE_URL || "").trim();
+  const serviceKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
   if (!url || !serviceKey) {
     throw new Error(
       "NEXT_PUBLIC_SUPABASE_URL atau SUPABASE_SERVICE_ROLE_KEY belum diatur."
@@ -73,10 +73,17 @@ async function postTextToFacebookPage(params: {
 }
 
 export async function POST(req: NextRequest) {
-  const authHeader = req.headers.get("authorization") || "";
-  const expectedSecret = process.env.CRON_SECRET || "";
+  const authHeader = (req.headers.get("authorization") || "").trim();
+  const expectedSecret = (process.env.CRON_SECRET || "").trim();
 
-  if (!expectedSecret || authHeader !== `Bearer ${expectedSecret}`) {
+  if (!expectedSecret) {
+    return NextResponse.json(
+      { ok: false, error: "CRON_SECRET missing on server." },
+      { status: 401 }
+    );
+  }
+
+  if (authHeader !== `Bearer ${expectedSecret}`) {
     return NextResponse.json(
       { ok: false, error: "Unauthorized cron trigger." },
       { status: 401 }
