@@ -103,6 +103,19 @@ function getDateCodeWib(date: Date = new Date()): string {
   return `${day}${month}${year}`;
 }
 
+function getCurrentWibMinutes(date: Date = new Date()): number {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Jakarta",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+
+  const hour = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+  const minute = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+  return hour * 60 + minute;
+}
+
 function buildDefaultDailySlots(dateCode: string): DailyScheduleSlot[] {
   return [
     {
@@ -547,6 +560,7 @@ export function StudioModulesWorkspace({
   };
 
   const dailySlots = useMemo<DailyScheduleSlot[]>(() => {
+    const currentWibMinutes = getCurrentWibMinutes(new Date());
     const baseSlots = buildDefaultDailySlots(todayDateCode);
     const todayTasks = tasks.filter((t) => {
       const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
@@ -557,10 +571,26 @@ export function StudioModulesWorkspace({
     });
 
     return baseSlots.map((slot) => {
-      const matchedTask = todayTasks.find(
-        (t) => inferTaskDivision(t) === slot.kind
-      );
-      if (!matchedTask) return slot;
+      const [slotH, slotM] = slot.timeLabel.split(".").map((n) => Number(n));
+      const slotMinutes = (slotH || 0) * 60 + (slotM || 0);
+      const isPastSlot = currentWibMinutes > slotMinutes;
+
+      const matchedTask = todayTasks.find((t) => {
+        const cp = (t.checkpoint_state ?? {}) as Record<string, unknown>;
+        const explicitSlot = String(cp.slotKind ?? "").toLowerCase();
+        if (explicitSlot === slot.kind) return true;
+        return inferTaskDivision(t) === slot.kind;
+      });
+
+      if (!matchedTask) {
+        return isPastSlot
+          ? {
+              ...slot,
+              status: "failed",
+              statusNote: "Terlewat jadwal otomatis (belum dieksekusi)",
+            }
+          : slot;
+      }
 
       const cp = (matchedTask.checkpoint_state ?? {}) as Record<
         string,
@@ -605,6 +635,12 @@ export function StudioModulesWorkspace({
       return {
         ...slot,
         caption: contentPreview,
+        ...(isPastSlot
+          ? {
+              status: "failed" as const,
+              statusNote: "Terlewat jadwal otomatis",
+            }
+          : {}),
       };
     });
   }, [tasks, todayDateCode]);
@@ -902,7 +938,7 @@ export function StudioModulesWorkspace({
                 <p className="text-xs text-slate-400">
                   Berjalan otomatis sesuai jadwal WIB melalui cron harian;
                   centang hijau (✓) bila sukses tayang dan silang merah (✕) bila
-                  gagal.
+                  gagal / terlewat.
                 </p>
               </div>
               <Badge variant="blue">Auto-Schedule WIB</Badge>
