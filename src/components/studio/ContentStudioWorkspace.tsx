@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import Link from "next/link";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { DbProject, DbTask, DbWorkflowRun } from "@/types/studio";
@@ -10,17 +10,16 @@ import {
   SlidersHorizontal,
   Copy,
   Check,
-  Download,
-  BookmarkPlus,
   AlertCircle,
   CheckCircle2,
-  Layers,
-  Film,
+  BookOpen,
   FileText,
+  Image as ImageIcon,
+  Film,
   CalendarClock,
 } from "lucide-react";
 
-type CronSlotKind = "story" | "photo" | "text" | "reels";
+export type ReadyPublishTabKey = "story" | "text" | "photo" | "reels";
 
 type TaskWithPayloads = DbTask & {
   workflow_run_id?: string | null;
@@ -34,155 +33,194 @@ type WorkflowRunWithPlan = DbWorkflowRun & {
   plan_json?: Record<string, unknown> | null;
 };
 
-interface PromptCardItem {
+interface ReadyPublishItem {
   id: string;
   taskId: string;
   projectId: string | null;
   workflowRunId: string | null;
   stepOrder: number;
-  clipNumber?: number;
-  isClipMaster: boolean;
-  badgeLabel: string;
+  channel: ReadyPublishTabKey;
+  slotTimeLabel: string;
   title: string;
-  subtitle: string;
-  promptText: string;
-  defaultSlotKind: CronSlotKind;
-  defaultCaption: string;
+  contentText: string;
+  mediaUrl: string;
+  isReadyToPublish: boolean;
   checkpointState: Record<string, unknown>;
 }
 
-const SLOT_OPTIONS: { value: CronSlotKind; label: string }[] = [
-  { value: "story", label: "Story (08.00 WIB)" },
-  { value: "photo", label: "Foto (11.00 WIB)" },
-  { value: "text", label: "Teks (15.00 WIB)" },
-  { value: "reels", label: "Reels (19.00 WIB)" },
+const PUBLISH_TABS: {
+  key: ReadyPublishTabKey;
+  label: string;
+  slotTime: string;
+}[] = [
+  { key: "story", label: "Story", slotTime: "08.00 WIB" },
+  { key: "text", label: "Teks", slotTime: "15.00 WIB" },
+  { key: "photo", label: "Foto", slotTime: "11.00 WIB" },
+  { key: "reels", label: "Reels", slotTime: "19.00 WIB" },
 ];
 
-function getAgentCode(task: TaskWithPayloads): string {
-  const payload = (task.input_payload ?? {}) as Record<string, unknown>;
-  const out = (task.output_payload ?? {}) as Record<string, unknown>;
-  return String(
-    payload.agentCode || out.agentCode || task.agent_code || ""
-  )
-    .toLowerCase()
+function cleanReadableText(raw: string, fallbackTitle: string): string {
+  const normalized = raw
+    .replace(/\\n/g, "\n")
+    .replace(/\\r/g, "")
+    .replace(/\*\*/g, "")
+    .replace(/^\s*\d+\.\s*/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
+
+  return normalized || fallbackTitle;
 }
 
-function inferDefaultSlotKind(
-  task: TaskWithPayloads,
-  isClipMaster: boolean
-): CronSlotKind {
-  const cp = (task.checkpoint_state ?? {}) as Record<string, unknown>;
-  const explicitSlot = String(cp.slotKind ?? "")
-    .toLowerCase()
-    .trim();
-  if (
-    explicitSlot === "story" ||
-    explicitSlot === "photo" ||
-    explicitSlot === "text" ||
-    explicitSlot === "reels"
-  ) {
-    return explicitSlot;
-  }
-
-  const code = getAgentCode(task);
-  if (isClipMaster || code === "video" || code === "reels") return "reels";
-  if (code === "story") return "story";
-  if (code === "photo" || code === "visual") return "photo";
-  return "text";
-}
-
-function extractClipTitle(promptText: string, fallbackIndex: number): string {
-  const sceneMatch = promptText.match(/SCENE\s*\d+\s*:\s*(.+)/i);
-  const durationMatch = promptText.match(/DURATION\s*:\s*(.+)/i);
-  if (sceneMatch) {
-    const sceneLabel = sceneMatch[1].trim();
-    const durLabel = durationMatch ? ` (${durationMatch[1].trim()})` : "";
-    return `Scene ${String(fallbackIndex).padStart(2, "0")}: ${sceneLabel}${durLabel}`;
-  }
-  return `Clip #${String(fallbackIndex).padStart(2, "0")} — Master Prompt`;
-}
-
-function expandTaskToPromptCards(task: TaskWithPayloads): PromptCardItem[] {
-  const payload = (task.input_payload ?? {}) as Record<string, unknown>;
-  const out = (task.output_payload ?? {}) as Record<string, unknown>;
+function inferPublishChannel(task: TaskWithPayloads): ReadyPublishTabKey {
   const cp =
     task.checkpoint_state && typeof task.checkpoint_state === "object"
       ? (task.checkpoint_state as Record<string, unknown>)
       : {};
-  const stepOrder = Number(payload.stepOrder ?? task.step_order ?? 1);
-  const code = getAgentCode(task);
-  const agentName = String(payload.agentName || payload.agentCode || "Agent");
-  const rawSteps = Array.isArray(out.steps)
-    ? (out.steps as Record<string, unknown>[])
-    : [];
+  const payload =
+    task.input_payload && typeof task.input_payload === "object"
+      ? (task.input_payload as Record<string, unknown>)
+      : {};
+  const out =
+    task.output_payload && typeof task.output_payload === "object"
+      ? (task.output_payload as Record<string, unknown>)
+      : {};
 
-  const savedCaption = String(cp.caption ?? "").trim();
+  const explicit = String(
+    cp.slotKind ??
+      cp.publishType ??
+      payload.slotKind ??
+      payload.publishType ??
+      out.division ??
+      ""
+  )
+    .toLowerCase()
+    .trim();
 
-  if (code === "video" && rawSteps.length > 0) {
-    return rawSteps.map((s, idx) => {
-      const clipNum = Number(s.stepNumber ?? idx + 1);
-      const actionText = String(s.action ?? "").trim();
-      const slotKind = inferDefaultSlotKind(task, true);
-      return {
-        id: `${task.id}-clip-${clipNum}-${idx}`,
+  if (explicit === "story") return "story";
+  if (explicit === "photo" || explicit === "visual") return "photo";
+  if (explicit === "reels" || explicit === "video") return "reels";
+  if (explicit === "text") return "text";
+
+  const code = String(
+    payload.agentCode ?? out.agentCode ?? task.agent_code ?? ""
+  )
+    .toLowerCase()
+    .trim();
+
+  if (code === "story") return "story";
+  if (code === "photo" || code === "visual") return "photo";
+  if (code === "video" || code === "reels") return "reels";
+
+  const textHint = `${task.title ?? ""} ${String(out.summary ?? "")}`.toLowerCase();
+  if (textHint.includes("story")) return "story";
+  if (
+    textHint.includes("foto") ||
+    textHint.includes("photo") ||
+    textHint.includes("gambar") ||
+    textHint.includes("visual")
+  ) {
+    return "photo";
+  }
+  if (textHint.includes("reels") || textHint.includes("video")) return "reels";
+
+  return "text";
+}
+
+function getSlotTimeForChannel(channel: ReadyPublishTabKey): string {
+  return (
+    PUBLISH_TABS.find((tab) => tab.key === channel)?.slotTime ?? "15.00 WIB"
+  );
+}
+
+function buildReadyPublishItems(tasks: TaskWithPayloads[]): ReadyPublishItem[] {
+  const items: ReadyPublishItem[] = [];
+
+  for (const task of tasks) {
+    const payload =
+      task.input_payload && typeof task.input_payload === "object"
+        ? (task.input_payload as Record<string, unknown>)
+        : {};
+    const out =
+      task.output_payload && typeof task.output_payload === "object"
+        ? (task.output_payload as Record<string, unknown>)
+        : {};
+    const cp =
+      task.checkpoint_state && typeof task.checkpoint_state === "object"
+        ? (task.checkpoint_state as Record<string, unknown>)
+        : {};
+
+    const stepOrder = Number(payload.stepOrder ?? task.step_order ?? 1);
+    const channel = inferPublishChannel(task);
+    const photoUrl = String(cp.photoUrl ?? out.photoUrl ?? "").trim();
+    const videoUrl = String(cp.videoUrl ?? out.videoUrl ?? "").trim();
+    const mediaUrl =
+      channel === "reels" ? videoUrl : channel === "photo" ? photoUrl : photoUrl || videoUrl;
+
+    const rawBody = String(
+      cp.caption ?? out.contentMarkdown ?? out.summary ?? task.title ?? ""
+    ).trim();
+    const cleanBody = cleanReadableText(rawBody, task.title);
+
+    // Jika satu item memuat paket Sore & Malam sekaligus, pisahkan agar siap tayang per slot
+    const hasSore = /slot sore/i.test(cleanBody);
+    const hasMalam = /slot malam/i.test(cleanBody);
+    if (hasSore && hasMalam) {
+      const malamSplit = cleanBody.split(/(?=slot malam)/i);
+      const sorePart = cleanReadableText(malamSplit[0] ?? "", `${task.title} — Sore`);
+      const malamPart = cleanReadableText(
+        malamSplit.slice(1).join("\n\n"),
+        `${task.title} — Malam`
+      );
+
+      items.push({
+        id: `${task.id}-sore`,
         taskId: task.id,
         projectId: task.project_id ?? null,
         workflowRunId: task.workflow_run_id ?? null,
         stepOrder,
-        clipNumber: clipNum,
-        isClipMaster: true,
-        badgeLabel: `Clip #${String(clipNum).padStart(2, "0")} • Master Prompt`,
-        title: extractClipTitle(actionText, clipNum),
-        subtitle: String(out.summary ?? task.title),
-        promptText: actionText,
-        defaultSlotKind: slotKind,
-        defaultCaption:
-          savedCaption || String(out.summary ?? task.title).trim(),
+        channel: channel === "photo" ? "photo" : "text",
+        slotTimeLabel: channel === "photo" ? "11.00 WIB" : "15.00 WIB",
+        title: `${task.title} • Sore`,
+        contentText: sorePart,
+        mediaUrl,
+        isReadyToPublish: Boolean(cp.readyToPublish || cp.scheduledForCron),
         checkpointState: cp,
-      };
-    });
-  }
+      });
 
-  const summary = String(out.summary ?? "").trim();
-  const contentMarkdown = String(out.contentMarkdown ?? "").trim();
-  const body =
-    contentMarkdown && summary && contentMarkdown !== summary
-      ? `${summary}\n\n${contentMarkdown}`
-      : contentMarkdown || summary || task.title;
+      items.push({
+        id: `${task.id}-malam`,
+        taskId: task.id,
+        projectId: task.project_id ?? null,
+        workflowRunId: task.workflow_run_id ?? null,
+        stepOrder,
+        channel: channel === "photo" ? "reels" : channel,
+        slotTimeLabel: "19.00 WIB",
+        title: `${task.title} • Malam`,
+        contentText: malamPart,
+        mediaUrl,
+        isReadyToPublish: Boolean(cp.readyToPublish || cp.scheduledForCron),
+        checkpointState: cp,
+      });
+      continue;
+    }
 
-  const isClip = code === "video";
-  const slotKind = inferDefaultSlotKind(task, isClip);
-
-  return [
-    {
+    items.push({
       id: task.id,
       taskId: task.id,
       projectId: task.project_id ?? null,
       workflowRunId: task.workflow_run_id ?? null,
       stepOrder,
-      isClipMaster: isClip,
-      badgeLabel: isClip ? "Master Prompt Klip" : agentName,
-      title: `#${stepOrder} • ${task.title}`,
-      subtitle: String(payload.instruction ?? ""),
-      promptText: body,
-      defaultSlotKind: slotKind,
-      defaultCaption: savedCaption || summary || task.title,
+      channel,
+      slotTimeLabel: getSlotTimeForChannel(channel),
+      title: task.title,
+      contentText: cleanBody,
+      mediaUrl,
+      isReadyToPublish: Boolean(cp.readyToPublish || cp.scheduledForCron),
       checkpointState: cp,
-    },
-  ];
-}
+    });
+  }
 
-function downloadMdFile(filename: string, markdown: string) {
-  const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  return items;
 }
 
 export function ContentStudioWorkspace() {
@@ -191,20 +229,17 @@ export function ContentStudioWorkspace() {
   const [runs, setRuns] = useState<DbWorkflowRun[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string>("all");
   const [tasks, setTasks] = useState<TaskWithPayloads[]>([]);
-  const [promptCategory, setPromptCategory] = useState<
-    "all" | "clip_master" | "creative_prompt"
-  >("clip_master");
-  const [slotSelections, setSlotSelections] = useState<
-    Record<string, CronSlotKind>
-  >({});
-  const [captionDrafts, setCaptionDrafts] = useState<Record<string, string>>(
+  const [activeTab, setActiveTab] = useState<ReadyPublishTabKey>("text");
+  const [draftTexts, setDraftTexts] = useState<Record<string, string>>({});
+  const [draftMediaUrls, setDraftMediaUrls] = useState<Record<string, string>>(
     {}
   );
-  const [savingSlotId, setSavingSlotId] = useState<string | null>(null);
-  const [savedSlotIds, setSavedSlotIds] = useState<Record<string, boolean>>({});
+  const [draftChannels, setDraftChannels] = useState<
+    Record<string, ReadyPublishTabKey>
+  >({});
+  const [savingId, setSavingId] = useState<string | null>(null);
+  const [savedIds, setSavedIds] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [savingMemId, setSavingMemId] = useState<string | null>(null);
-  const [savedMemIds, setSavedMemIds] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [isLoggedIn, setIsLoggedIn] = useState<boolean | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -253,12 +288,8 @@ export function ContentStudioWorkspace() {
         { data: tasksData, error: tasksErr },
       ] = await Promise.all([runsQuery, tasksQuery]);
 
-      if (runsErr) {
-        setErrorMsg(runsErr.message);
-      }
-      if (tasksErr) {
-        setErrorMsg(tasksErr.message);
-      }
+      if (runsErr) setErrorMsg(runsErr.message);
+      if (tasksErr) setErrorMsg(tasksErr.message);
 
       const sortedTasks = ((tasksData as TaskWithPayloads[]) ?? []).sort(
         (a, b) => {
@@ -328,62 +359,60 @@ export function ContentStudioWorkspace() {
     }
   }, [selectedProject, isLoggedIn, loadStudioData]);
 
-  const promptOnlyTasks = tasks.filter((t) => {
-    const code = getAgentCode(t);
-    return !["marketing", "publishing", "quality"].includes(code);
-  });
+  const allReadyItems = useMemo(() => {
+    const rawItems = buildReadyPublishItems(tasks);
+    if (selectedRunId === "all") return rawItems;
+    return rawItems.filter((item) => item.workflowRunId === selectedRunId);
+  }, [tasks, selectedRunId]);
 
-  const allCards = promptOnlyTasks.flatMap(expandTaskToPromptCards);
+  const countsByTab = useMemo(() => {
+    return {
+      story: allReadyItems.filter(
+        (i) => (draftChannels[i.id] ?? i.channel) === "story"
+      ).length,
+      text: allReadyItems.filter(
+        (i) => (draftChannels[i.id] ?? i.channel) === "text"
+      ).length,
+      photo: allReadyItems.filter(
+        (i) => (draftChannels[i.id] ?? i.channel) === "photo"
+      ).length,
+      reels: allReadyItems.filter(
+        (i) => (draftChannels[i.id] ?? i.channel) === "reels"
+      ).length,
+    };
+  }, [allReadyItems, draftChannels]);
 
-  const clipMasterCards = allCards.filter((c) => c.isClipMaster);
-  const creativePromptCards = allCards.filter((c) => !c.isClipMaster);
+  const tabItems = useMemo(() => {
+    return allReadyItems.filter(
+      (i) => (draftChannels[i.id] ?? i.channel) === activeTab
+    );
+  }, [allReadyItems, draftChannels, activeTab]);
 
-  const filteredPrompts = allCards.filter((c) => {
-    if (selectedRunId !== "all" && c.workflowRunId !== selectedRunId) {
-      return false;
-    }
-    if (promptCategory === "clip_master" && !c.isClipMaster) {
-      return false;
-    }
-    if (promptCategory === "creative_prompt" && c.isClipMaster) {
-      return false;
-    }
-    return true;
-  });
-
-  const handleCopy = async (card: PromptCardItem) => {
+  const handleCopy = async (id: string, text: string) => {
     try {
-      await navigator.clipboard.writeText(card.promptText);
-      setCopiedId(card.id);
+      await navigator.clipboard.writeText(text);
+      setCopiedId(id);
       setTimeout(() => {
-        setCopiedId((prev) => (prev === card.id ? null : prev));
+        setCopiedId((prev) => (prev === id ? null : prev));
       }, 2000);
     } catch {
-      setErrorMsg("Gagal menyalin master prompt ke clipboard.");
+      setErrorMsg("Gagal menyalin konten ke clipboard.");
     }
   };
 
-  const handleDownloadOne = (card: PromptCardItem) => {
-    const slug = card.clipNumber
-      ? `clip-${String(card.clipNumber).padStart(2, "0")}-master-prompt`
-      : `step-${card.stepOrder}-prompt`;
-    downloadMdFile(`${slug}.md`, `# ${card.title}\n\n${card.promptText}\n`);
-  };
-
-  const handlePrepareForCron = async (card: PromptCardItem) => {
-    if (savingSlotId) return;
-    setSavingSlotId(card.id);
+  const handleMarkReadyToPublish = async (item: ReadyPublishItem) => {
+    if (savingId) return;
+    setSavingId(item.id);
     setErrorMsg(null);
     setInfoMsg(null);
 
-    const chosenSlot = slotSelections[card.id] ?? card.defaultSlotKind;
-    const chosenCaption = (
-      captionDrafts[card.id] ?? card.defaultCaption
-    ).trim();
+    const finalChannel = draftChannels[item.id] ?? item.channel;
+    const finalText = (draftTexts[item.id] ?? item.contentText).trim();
+    const finalMedia = (draftMediaUrls[item.id] ?? item.mediaUrl).trim();
 
-    if (!chosenCaption) {
-      setErrorMsg("Caption tidak boleh kosong sebelum disiapkan untuk cron.");
-      setSavingSlotId(null);
+    if (!finalText) {
+      setErrorMsg("Konten siap publish tidak boleh kosong.");
+      setSavingId(null);
       return;
     }
 
@@ -394,18 +423,31 @@ export function ContentStudioWorkspace() {
       } = await supabase.auth.getUser();
       if (!user) return;
 
-      const nextCheckpoint = {
-        ...card.checkpointState,
-        slotKind: chosenSlot,
-        caption: chosenCaption,
+      const nextCheckpoint: Record<string, unknown> = {
+        ...item.checkpointState,
+        slotKind: finalChannel,
+        publishType:
+          finalChannel === "reels"
+            ? "reels"
+            : finalChannel === "photo" || finalChannel === "story"
+            ? "photo"
+            : "text",
+        caption: finalText,
+        readyToPublish: true,
         scheduledForCron: true,
         preparedAt: new Date().toISOString(),
       };
 
+      if (finalChannel === "reels") {
+        nextCheckpoint.videoUrl = finalMedia;
+      } else if (finalMedia) {
+        nextCheckpoint.photoUrl = finalMedia;
+      }
+
       const { error } = await supabase
         .from("tasks")
         .update({ checkpoint_state: nextCheckpoint })
-        .eq("id", card.taskId)
+        .eq("id", item.taskId)
         .eq("user_id", user.id);
 
       if (error) {
@@ -415,78 +457,29 @@ export function ContentStudioWorkspace() {
 
       setTasks((prev) =>
         prev.map((t) =>
-          t.id === card.taskId ? { ...t, checkpoint_state: nextCheckpoint } : t
+          t.id === item.taskId ? { ...t, checkpoint_state: nextCheckpoint } : t
         )
       );
-      setSavedSlotIds((prev) => ({ ...prev, [card.id]: true }));
+      setSavedIds((prev) => ({ ...prev, [item.id]: true }));
       setInfoMsg(
-        `Slot "${chosenSlot}" & caption siap dieksekusi cron untuk tugas #${card.stepOrder}.`
+        `Konten "${item.title}" ditandai Siap Publish untuk tab ${finalChannel.toUpperCase()} (${getSlotTimeForChannel(finalChannel)}).`
       );
     } catch (err) {
       setErrorMsg(
         err instanceof Error
           ? err.message
-          : "Gagal menyiapkan slot cron untuk tugas ini."
+          : "Gagal menyimpan status siap publish."
       );
     } finally {
-      setSavingSlotId(null);
+      setSavingId(null);
     }
   };
 
-  const handleSaveToMemory = async (card: PromptCardItem) => {
-    if (savingMemId) return;
-    setSavingMemId(card.id);
-    setErrorMsg(null);
-
-    try {
-      const supabase = createSupabaseBrowserClient();
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) return;
-
-      const memKey = card.clipNumber
-        ? `clip_${String(card.clipNumber).padStart(2, "0")}_master_${card.taskId.slice(0, 6)}`
-        : `prompt_${card.stepOrder}_${card.taskId.slice(0, 6)}`;
-
-      const { error } = await supabase.from("memories").insert({
-        user_id: user.id,
-        project_id: card.projectId || selectedProject || null,
-        scope: "project",
-        memory_key: memKey,
-        content: card.promptText.slice(0, 3500),
-        importance: 8,
-      });
-
-      if (error) {
-        setErrorMsg(error.message);
-        return;
-      }
-
-      setSavedMemIds((prev) => ({ ...prev, [card.id]: true }));
-    } catch (err) {
-      setErrorMsg(
-        err instanceof Error ? err.message : "Gagal menyimpan ke memori."
-      );
-    } finally {
-      setSavingMemId(null);
-    }
-  };
-
-  const handleExportCompilation = () => {
-    if (filteredPrompts.length === 0) return;
-    const activeProj = projects.find((p) => p.id === selectedProject);
-    const projTitle = activeProj?.name || "Proyek";
-    const sections = filteredPrompts.map(
-      (c) => `## ${c.title}\n\n${c.promptText}`
-    );
-
-    downloadMdFile(
-      "content-studio-master-prompts.md",
-      `# Master Prompt Katalog — ${projTitle}\n\n${sections.join(
-        "\n\n---\n\n"
-      )}\n`
-    );
+  const renderTabIcon = (key: ReadyPublishTabKey) => {
+    if (key === "story") return <BookOpen className="h-3.5 w-3.5" />;
+    if (key === "text") return <FileText className="h-3.5 w-3.5" />;
+    if (key === "photo") return <ImageIcon className="h-3.5 w-3.5" />;
+    return <Film className="h-3.5 w-3.5" />;
   };
 
   return (
@@ -494,8 +487,8 @@ export function ContentStudioWorkspace() {
       {isLoggedIn === false && (
         <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-xs text-amber-300 flex flex-wrap items-center justify-between gap-2">
           <span>
-            Anda belum login. Silakan masuk untuk melihat daftar Master Prompt
-            per klip di Content Studio.
+            Anda belum login. Silakan masuk untuk melihat konten siap publish di
+            Content Studio.
           </span>
           <Link
             href="/login"
@@ -520,6 +513,7 @@ export function ContentStudioWorkspace() {
         </div>
       )}
 
+      {/* Filter Proyek & Sesi Run */}
       <div className="glass-panel rounded-2xl p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2.5">
           <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500 dark:text-slate-400">
@@ -562,258 +556,215 @@ export function ContentStudioWorkspace() {
               );
             })}
           </select>
-
-          <div className="inline-flex rounded-xl border border-slate-700 bg-slate-900/80 p-1 text-xs">
-            <button
-              type="button"
-              onClick={() => setPromptCategory("clip_master")}
-              className={`rounded-lg px-2.5 py-1 font-medium transition ${
-                promptCategory === "clip_master"
-                  ? "bg-purple-600 text-white"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              Master Prompt Klip ({clipMasterCards.length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setPromptCategory("creative_prompt")}
-              className={`rounded-lg px-2.5 py-1 font-medium transition ${
-                promptCategory === "creative_prompt"
-                  ? "bg-emerald-600 text-white"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              Prompt Dasar ({creativePromptCards.length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setPromptCategory("all")}
-              className={`rounded-lg px-2.5 py-1 font-medium transition ${
-                promptCategory === "all"
-                  ? "bg-blue-600 text-white"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              Semua ({allCards.length})
-            </button>
-          </div>
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
-          {filteredPrompts.length > 0 && (
-            <button
-              type="button"
-              onClick={handleExportCompilation}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:opacity-95"
-            >
-              <Download className="h-3.5 w-3.5" />
-              <span>Unduh Semua (.md)</span>
-            </button>
-          )}
-          <Link
-            href="/command-center"
-            className="rounded-xl border border-slate-200 dark:border-studio-border bg-slate-50 dark:bg-studio-navy px-3 py-1.5 text-xs font-medium text-blue-400 hover:border-blue-500/40"
-          >
-            Buka Command Center →
-          </Link>
-        </div>
+        <Link
+          href="/command-center"
+          className="rounded-xl border border-slate-200 dark:border-studio-border bg-slate-50 dark:bg-studio-navy px-3 py-1.5 text-xs font-medium text-blue-400 hover:border-blue-500/40"
+        >
+          Buka Command Center →
+        </Link>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-        <div className="glass-panel rounded-2xl p-4">
-          <div className="flex items-center gap-2 text-xs text-slate-400">
-            <Film className="h-4 w-4 text-purple-400" />
-            <span>Master Prompt Per Klip</span>
-          </div>
-          <p className="mt-1.5 text-2xl font-bold">{clipMasterCards.length}</p>
-        </div>
-        <div className="glass-panel rounded-2xl p-4">
-          <div className="flex items-center gap-2 text-xs text-slate-400">
-            <FileText className="h-4 w-4 text-emerald-400" />
-            <span>Prompt Cerita / Karakter / Visual</span>
-          </div>
-          <p className="mt-1.5 text-2xl font-bold">
-            {creativePromptCards.length}
-          </p>
-        </div>
-        <div className="glass-panel rounded-2xl p-4">
-          <div className="flex items-center gap-2 text-xs text-slate-400">
-            <Layers className="h-4 w-4 text-blue-400" />
-            <span>Total Kartu Ditampilkan</span>
-          </div>
-          <p className="mt-1.5 text-2xl font-bold">{filteredPrompts.length}</p>
-        </div>
+      {/* 4 Tab Kanal Konten Siap Publish */}
+      <div className="glass-panel rounded-2xl p-2 flex flex-wrap gap-1.5">
+        {PUBLISH_TABS.map((tab) => {
+          const isActive = activeTab === tab.key;
+          const totalInTab = countsByTab[tab.key];
+          return (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setActiveTab(tab.key)}
+              className={`flex-1 min-w-[130px] inline-flex items-center justify-center gap-2 rounded-xl px-3.5 py-2.5 text-xs font-semibold transition ${
+                isActive
+                  ? "bg-gradient-to-r from-blue-600 to-purple-600 text-white shadow-sm"
+                  : "text-slate-400 hover:bg-slate-800/60 hover:text-slate-100"
+              }`}
+            >
+              {renderTabIcon(tab.key)}
+              <span>{tab.label}</span>
+              <span
+                className={`rounded-full px-2 py-0.5 text-[10px] ${
+                  isActive
+                    ? "bg-white/20 text-white"
+                    : "bg-slate-800 text-slate-300"
+                }`}
+              >
+                {totalInTab}
+              </span>
+            </button>
+          );
+        })}
       </div>
 
+      {/* Daftar Konten Siap Publish pada Tab Aktif */}
       <div className="glass-panel rounded-2xl p-4 sm:p-6 space-y-3">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <div className="flex items-center gap-2">
-            <Sparkles className="h-4 w-4 text-purple-400" />
+            <Sparkles className="h-4 w-4 text-emerald-400" />
             <h2 className="text-base font-semibold">
-              Katalog Master Prompt Utuh Per Klip ({filteredPrompts.length})
+              Konten Siap Publish —{" "}
+              {PUBLISH_TABS.find((t) => t.key === activeTab)?.label} (
+              {tabItems.length})
             </h2>
           </div>
-          <Badge variant="purple">1 Master Prompt Utuh / Klip</Badge>
+          <Badge variant="emerald">
+            Slot {getSlotTimeForChannel(activeTab)}
+          </Badge>
         </div>
 
         {loading ? (
-          <p className="text-xs text-slate-400 py-6">Memuat daftar prompt...</p>
-        ) : filteredPrompts.length === 0 ? (
+          <p className="text-xs text-slate-400 py-6">
+            Memuat konten siap publish...
+          </p>
+        ) : tabItems.length === 0 ? (
           <div className="py-8 text-center space-y-2">
             <p className="text-xs text-slate-400">
-              Belum ada Master Prompt klip selesai untuk filter yang dipilih.
+              Belum ada konten siap publish untuk tab{" "}
+              <strong className="text-slate-200">
+                {PUBLISH_TABS.find((t) => t.key === activeTab)?.label}
+              </strong>
+              .
             </p>
-            <Link
-              href="/command-center"
-              className="inline-block text-xs text-blue-400 hover:underline"
-            >
-              Jalankan Video Agent di AI Command Center terlebih dahulu →
-            </Link>
+            <p className="text-[11px] text-slate-500">
+              Anda juga bisa memindahkan item dari tab lain melalui dropdown
+              kanal di kartu konten.
+            </p>
           </div>
         ) : (
           <div className="space-y-3">
-            {filteredPrompts.map((card) => {
-              const isCopied = copiedId === card.id;
-              const isSaving = savingMemId === card.id;
-              const isSaved = Boolean(savedMemIds[card.id]);
-              const isSavingSlot = savingSlotId === card.id;
-              const isSlotPrepared =
-                Boolean(savedSlotIds[card.id]) ||
-                Boolean(card.checkpointState.scheduledForCron);
-              const currentSlot = slotSelections[card.id] ?? card.defaultSlotKind;
-              const currentCaption =
-                captionDrafts[card.id] ?? card.defaultCaption;
+            {tabItems.map((item) => {
+              const currentText = draftTexts[item.id] ?? item.contentText;
+              const currentMedia = draftMediaUrls[item.id] ?? item.mediaUrl;
+              const currentChannel = draftChannels[item.id] ?? item.channel;
+              const isCopied = copiedId === item.id;
+              const isSaving = savingId === item.id;
+              const isReady =
+                Boolean(savedIds[item.id]) || item.isReadyToPublish;
 
               return (
                 <div
-                  key={card.id}
-                  className="rounded-2xl border border-slate-200/80 dark:border-studio-border bg-slate-50/70 dark:bg-studio-navy/80 p-4 space-y-2.5 text-xs"
+                  key={item.id}
+                  className="rounded-2xl border border-slate-200/80 dark:border-studio-border bg-slate-50/70 dark:bg-studio-navy/80 p-4 space-y-3 text-xs"
                 >
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                     <div className="space-y-1">
-                      <div className="flex flex-wrap items-center gap-2 font-semibold">
-                        <span className="text-sm">{card.title}</span>
-                        <Badge variant={card.isClipMaster ? "purple" : "blue"}>
-                          {card.badgeLabel}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-semibold text-sm text-slate-100">
+                          {item.title}
+                        </span>
+                        <Badge variant={isReady ? "emerald" : "blue"}>
+                          {isReady ? "Siap Publish" : "Draf Siap Rilis"}
                         </Badge>
-                        {isSlotPrepared && (
-                          <Badge variant="emerald">
-                            Slot: {currentSlot}
-                          </Badge>
-                        )}
+                        <span className="text-[11px] text-slate-400">
+                          Jadwal: {getSlotTimeForChannel(currentChannel)}
+                        </span>
                       </div>
-                      {card.subtitle && (
-                        <p className="text-[11px] text-slate-400">
-                          {card.subtitle}
-                        </p>
-                      )}
                     </div>
 
                     <div className="flex items-center gap-1.5 flex-wrap shrink-0">
+                      <select
+                        value={currentChannel}
+                        onChange={(e) =>
+                          setDraftChannels((prev) => ({
+                            ...prev,
+                            [item.id]: e.target.value as ReadyPublishTabKey,
+                          }))
+                        }
+                        aria-label={`Pindahkan kanal untuk ${item.title}`}
+                        className="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] text-slate-200"
+                      >
+                        <option value="story">Tab Story</option>
+                        <option value="text">Tab Teks</option>
+                        <option value="photo">Tab Foto</option>
+                        <option value="reels">Tab Reels</option>
+                      </select>
+
                       <button
                         type="button"
-                        onClick={() => handleCopy(card)}
-                        className="inline-flex items-center gap-1 rounded-lg border border-purple-500/40 bg-purple-600/20 px-2.5 py-1 text-[11px] font-medium text-purple-200 hover:bg-purple-600/30"
+                        onClick={() => void handleCopy(item.id, currentText)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-slate-600/40 bg-slate-800/70 px-2.5 py-1 text-[11px] text-slate-200 hover:bg-slate-700/70"
                       >
                         {isCopied ? (
                           <>
                             <Check className="h-3 w-3 text-emerald-400" />
-                            <span>Master Prompt Tersalin</span>
+                            <span>Tersalin</span>
                           </>
                         ) : (
                           <>
-                            <Copy className="h-3 w-3 text-purple-300" />
-                            <span>Salin Master Prompt</span>
+                            <Copy className="h-3 w-3 text-blue-400" />
+                            <span>Salin Konten</span>
                           </>
                         )}
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDownloadOne(card)}
-                        className="inline-flex items-center gap-1 rounded-lg border border-slate-600/40 bg-slate-800/70 px-2.5 py-1 text-[11px] text-slate-200 hover:bg-slate-700/70"
-                      >
-                        <Download className="h-3 w-3 text-blue-400" />
-                        <span>.md</span>
-                      </button>
-                      <button
-                        type="button"
-                        disabled={isSaving || isSaved}
-                        onClick={() => handleSaveToMemory(card)}
-                        className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/30 bg-emerald-600/20 px-2.5 py-1 text-[11px] text-emerald-300 hover:bg-emerald-600/30 disabled:opacity-60"
-                      >
-                        <BookmarkPlus className="h-3 w-3" />
-                        <span>
-                          {isSaved
-                            ? "Di Memori"
-                            : isSaving
-                            ? "Menyimpan..."
-                            : "Simpan ke Memori"}
-                        </span>
-                      </button>
-                    </div>
-                  </div>
-
-                  <pre className="rounded-xl border border-slate-700/50 bg-slate-950/75 p-3.5 whitespace-pre-wrap font-mono text-[11px] text-slate-200 leading-relaxed overflow-x-auto">
-                    {card.promptText}
-                  </pre>
-
-                  <div className="rounded-xl border border-slate-700/60 bg-slate-900/70 p-3 space-y-2">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <CalendarClock className="h-3.5 w-3.5 text-emerald-400" />
-                        <span className="text-[11px] font-medium text-slate-200">
-                          Siapkan ke Jadwal Cron:
-                        </span>
-                        <select
-                          value={currentSlot}
-                          onChange={(e) =>
-                            setSlotSelections((prev) => ({
-                              ...prev,
-                              [card.id]: e.target.value as CronSlotKind,
-                            }))
-                          }
-                          aria-label={`Pilih slot cron untuk ${card.title}`}
-                          className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1 text-[11px] text-slate-100"
-                        >
-                          {SLOT_OPTIONS.map((opt) => (
-                            <option key={opt.value} value={opt.value}>
-                              {opt.label}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
 
                       <button
                         type="button"
-                        disabled={isSavingSlot}
-                        onClick={() => void handlePrepareForCron(card)}
+                        disabled={isSaving}
+                        onClick={() => void handleMarkReadyToPublish(item)}
                         className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
                       >
                         <CalendarClock className="h-3 w-3" />
                         <span>
-                          {isSavingSlot
-                            ? "Menyiapkan..."
-                            : isSlotPrepared
-                            ? "Perbarui Slot Cron"
-                            : "Siapkan ke Jadwal Cron"}
+                          {isSaving
+                            ? "Menyimpan..."
+                            : isReady
+                            ? "Perbarui Siap Publish"
+                            : "Tandai Siap Publish"}
                         </span>
                       </button>
                     </div>
-
-                    <input
-                      type="text"
-                      value={currentCaption}
-                      onChange={(e) =>
-                        setCaptionDrafts((prev) => ({
-                          ...prev,
-                          [card.id]: e.target.value,
-                        }))
-                      }
-                      placeholder="Caption final yang akan dikirim oleh cron ke Facebook Page..."
-                      className="w-full rounded-lg border border-slate-700 bg-slate-950/90 px-3 py-1.5 text-[11px] text-slate-200"
-                    />
                   </div>
+
+                  <textarea
+                    rows={5}
+                    value={currentText}
+                    onChange={(e) =>
+                      setDraftTexts((prev) => ({
+                        ...prev,
+                        [item.id]: e.target.value,
+                      }))
+                    }
+                    className="w-full rounded-xl border border-slate-700/70 bg-slate-950/80 p-3 text-xs leading-relaxed text-slate-200 focus:border-blue-500 focus:outline-none"
+                  />
+
+                  {(currentChannel === "photo" ||
+                    currentChannel === "story" ||
+                    currentChannel === "reels" ||
+                    currentMedia) && (
+                    <div className="space-y-2">
+                      <input
+                        type="url"
+                        value={currentMedia}
+                        onChange={(e) =>
+                          setDraftMediaUrls((prev) => ({
+                            ...prev,
+                            [item.id]: e.target.value,
+                          }))
+                        }
+                        placeholder={
+                          currentChannel === "reels"
+                            ? "URL video Reels (.mp4) siap publish..."
+                            : "URL gambar / visual (.jpg/.png/.webp) siap publish..."
+                        }
+                        className="w-full rounded-xl border border-slate-700/70 bg-slate-950/80 px-3 py-1.5 text-xs text-slate-200 focus:border-blue-500 focus:outline-none"
+                      />
+
+                      {currentMedia &&
+                        /^https?:\/\//i.test(currentMedia) &&
+                        !currentMedia.includes("...") &&
+                        currentChannel !== "reels" && (
+                          <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-950 p-1.5">
+                            <img
+                              src={currentMedia}
+                              alt={item.title}
+                              className="max-h-48 w-full rounded-lg object-cover"
+                            />
+                          </div>
+                        )}
+                    </div>
+                  )}
                 </div>
               );
             })}
