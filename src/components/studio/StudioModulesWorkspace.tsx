@@ -94,57 +94,84 @@ interface PublishItemState {
 const STORAGE_KEY = "denjeh_agent_model_prefs";
 
 const FALLBACK_MODEL_OPTIONS = [
-  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash (Free)" },
-  { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite (Free)" },
+  { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash" },
+  { id: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash Lite" },
+  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
   { id: "llama-3.3-70b-versatile", label: "Llama 3.3 70B Versatile (Groq)" },
   { id: "llama-3.1-8b-instant", label: "Llama 3.1 8B Instant (Groq)" },
 ];
 
-const DEFAULT_DAILY_SLOTS: DailyScheduleSlot[] = [
-  {
-    id: "slot-0800-story",
-    dateCode: "261126",
-    timeLabel: "08.00",
-    kind: "story",
-    title: "Slot Pagi — Story Singkat",
-    caption: "Sapaan pagi & pemantik interaksi singkat hari ini.",
-    mediaUrl: "",
-    status: "pending",
-  },
-  {
-    id: "slot-1100-photo",
-    dateCode: "261126",
-    timeLabel: "11.00",
-    kind: "photo",
-    title: "Slot Siang — Konten Foto / Visual",
-    caption: "Visual tunggal dengan pesan utama yang jelas.",
-    mediaUrl: "",
-    status: "pending",
-  },
-  {
-    id: "slot-1500-text",
-    dateCode: "261126",
-    timeLabel: "15.00",
-    kind: "text",
-    title: "Slot Sore — Postingan Teks / Edukasi",
-    caption: "Ringkasan insight, tips praktis, atau diskusi santai.",
-    mediaUrl: "",
-    status: "pending",
-  },
-  {
-    id: "slot-1900-reels",
-    dateCode: "261126",
-    timeLabel: "19.00",
-    kind: "reels",
-    title: "Slot Malam — Video / Reels",
-    caption: "Cuplikan video pendek berdurasi singkat.",
-    mediaUrl: "",
-    status: "pending",
-  },
-];
+function getTodayDateCodeWib(): string {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Jakarta",
+    day: "2-digit",
+    month: "2-digit",
+    year: "2-digit",
+  }).formatToParts(new Date());
+
+  const day = parts.find((p) => p.type === "day")?.value ?? "01";
+  const month = parts.find((p) => p.type === "month")?.value ?? "01";
+  const year = parts.find((p) => p.type === "year")?.value ?? "26";
+  return `${day}${month}${year}`;
+}
+
+function buildDefaultDailySlots(dateCode: string): DailyScheduleSlot[] {
+  return [
+    {
+      id: `slot-${dateCode}-0800-story`,
+      dateCode,
+      timeLabel: "08.00",
+      kind: "story",
+      title: "Slot Pagi — Story Singkat",
+      caption: "Sapaan pagi & pemantik interaksi singkat hari ini.",
+      mediaUrl: "",
+      status: "pending",
+    },
+    {
+      id: `slot-${dateCode}-1100-photo`,
+      dateCode,
+      timeLabel: "11.00",
+      kind: "photo",
+      title: "Slot Siang — Konten Foto / Visual",
+      caption: "Visual tunggal dengan pesan utama yang jelas.",
+      mediaUrl: "",
+      status: "pending",
+    },
+    {
+      id: `slot-${dateCode}-1500-text`,
+      dateCode,
+      timeLabel: "15.00",
+      kind: "text",
+      title: "Slot Sore — Postingan Teks / Edukasi",
+      caption: "Ringkasan insight, tips praktis, atau diskusi santai.",
+      mediaUrl: "",
+      status: "pending",
+    },
+    {
+      id: `slot-${dateCode}-1900-reels`,
+      dateCode,
+      timeLabel: "19.00",
+      kind: "reels",
+      title: "Slot Malam — Video / Reels",
+      caption: "Cuplikan video pendek berdurasi singkat.",
+      mediaUrl: "",
+      status: "pending",
+    },
+  ];
+}
 
 function sanitizeCaptionText(raw: string, fallbackTitle: string): string {
-  const cleaned = raw
+  let text = raw.trim();
+
+  const jsonMatch = text.match(
+    /\{[\s\S]*"message"\s*:\s*"([\s\S]*?)"[\s\S]*\}/
+  );
+  if (jsonMatch?.[1]) {
+    text = jsonMatch[1].replace(/\\n/g, "\n").replace(/\\"/g, '"');
+  }
+
+  const cleaned = text
+    .replace(/^\d+\.\s*Prepare Facebook Page payload:\s*/i, "")
     .replace(/["']?accessToken["']?\s*:\s*["'][^"']*["']?,?/gi, "")
     .replace(/access_token\s*=\s*[^\s&"']+/gi, "")
     .replace(/EAA[A-Za-z0-9_-]{15,}/g, "")
@@ -213,7 +240,6 @@ function isFinishedDeliverableTask(t: TaskWithPayloads): boolean {
     .toLowerCase()
     .trim();
 
-  // Langkah perantara/riset/audit bukan barang jadi publikasi
   const intermediateCodes = new Set([
     "idea",
     "research",
@@ -232,12 +258,10 @@ function isFinishedDeliverableTask(t: TaskWithPayloads): boolean {
     String(cp.photoUrl ?? "").trim() || String(cp.videoUrl ?? "").trim()
   );
 
-  // Harus punya hasil output yang sudah terisi
   if (!contentBody && !hasMediaAsset) {
     return false;
   }
 
-  // Cegah teks mentah yang hanya berupa daftar langkah/rencana tugas
   const looksLikeRawTaskPlan =
     /^\s*(1\.\s*\[[^\]]+\]|berikan daftar\s+\d+\s+konsep|mengumpulkan data,\s*referensi)/i.test(
       contentBody
@@ -251,6 +275,7 @@ export function StudioModulesWorkspace({
 }: {
   moduleKey: StudioModuleKey;
 }) {
+  const todayDateCode = useMemo(() => getTodayDateCodeWib(), []);
   const [projects, setProjects] = useState<DbProject[]>([]);
   const [selectedProject, setSelectedProject] = useState<string>("");
   const [authReady, setAuthReady] = useState<boolean>(false);
@@ -278,8 +303,9 @@ export function StudioModulesWorkspace({
   const [generatingPhotoTaskId, setGeneratingPhotoTaskId] = useState<
     string | null
   >(null);
-  const [dailySlots, setDailySlots] =
-    useState<DailyScheduleSlot[]>(DEFAULT_DAILY_SLOTS);
+  const [dailySlots, setDailySlots] = useState<DailyScheduleSlot[]>(() =>
+    buildDefaultDailySlots(getTodayDateCodeWib())
+  );
   const [runningSlotId, setRunningSlotId] = useState<string | null>(null);
   const [runningAllSlots, setRunningAllSlots] = useState(false);
   const [fbPageId, setFbPageId] = useState("");
@@ -1353,7 +1379,7 @@ export function StudioModulesWorkspace({
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h2 className="text-base font-semibold">
-                  Ceklis Jadwal Posting Harian (Tanggal 261126)
+                  Ceklis Jadwal Posting Harian (Tanggal {todayDateCode})
                 </h2>
                 <p className="text-xs text-slate-400">
                   Asisten menjalankan slot harian sesuai jam: centang hijau (✓)
