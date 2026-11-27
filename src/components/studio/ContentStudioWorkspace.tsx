@@ -92,7 +92,6 @@ function cleanReadableText(raw: string, fallbackTitle: string): string {
     .replace(/\\n/g, "\n")
     .replace(/\\r/g, "")
     .replace(/\*\*/g, "")
-    .replace(/^\s*\d+\.\s*/gm, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
@@ -100,80 +99,115 @@ function cleanReadableText(raw: string, fallbackTitle: string): string {
 }
 
 /**
- * Untuk kanal 'text' dan 'story', hapus bagian caption, tagar/hashtag, dan CTA promosi
- * agar hanya menyisakan teks motivasi / kata-kata / langkah-langkah / tutorial.
+ * Mengubah output mentah ber-opsi / ber-label menjadi 1 konten jadi yang bersih.
  */
-function sanitizePureTextContent(raw: string): string {
-  const lines = raw
-    .replace(/\\n/g, "\n")
-    .replace(/\\r/g, "")
-    .replace(/\*\*/g, "")
-    .split("\n")
-    .map((line) => line.trim());
+function finalizeContentByChannel(
+  channel: ReadyPublishTabKey,
+  raw: string
+): string {
+  let text = cleanReadableText(raw, "");
+  if (!text) return "";
 
-  const filtered = lines.filter((line) => {
-    if (!line) return true;
-    if (
-      /^(caption(\s+slot\s+\w+)?|hashtag(s)?|tagar|rekomendasi\s+jam\s+unggah|call\s*-\s*to\s*-\s*action|cta)\s*:/i.test(
-        line
-      )
-    ) {
-      return false;
-    }
-    const withoutTags = line.replace(/(?:^|\s)#[A-Za-z0-9_]+/g, "").trim();
-    if (!withoutTags && /#[A-Za-z0-9_]+/.test(line)) {
-      return false;
-    }
-    return true;
-  });
-
-  const strippedTagsLines = filtered.map((line) =>
-    line.replace(/\s+#[A-Za-z0-9_]+/g, "").trim()
-  );
-
-  return strippedTagsLines
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function formatContentByChannel(channel: ReadyPublishTabKey, raw: string): string {
-  const cleaned = cleanReadableText(raw, "");
-  if (!cleaned) return "";
-
-  if (channel === "text" || channel === "story") {
-    return sanitizePureTextContent(cleaned);
+  // Jika ada OPSI 2 / PILIHAN 2 / KONSEP 2 / KONSEP VISUAL 2, potong mulai opsi ke-2 agar hanya ambil 1 versi final
+  const secondaryOptionMatch =
+    /(?:^|\n)\s*(?:-{2,}\s*)?(?:opsi|pilihan|konsep(?:\s+visual)?)\s*(?:ke-?\s*)?2\b[^\n]*/i.exec(
+      text
+    );
+  if (secondaryOptionMatch && typeof secondaryOptionMatch.index === "number") {
+    text = text.slice(0, secondaryOptionMatch.index).trim();
   }
 
-  return cleaned;
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => {
+      if (!line) return true;
+
+      // Buang kalimat pengantar / meta / prompt teknis
+      if (
+        /^(berikut\s+(adalah|ini)\s+[\d\w\s]*(pilihan|opsi|konsep|draf|rancangan)|slot\s+(pagi|siang|sore|malam)\s*:?|catatan\s+audit\s+kualitas\s*:?)\s*$/i.test(
+          line
+        )
+      ) {
+        return false;
+      }
+
+      // Buang header dekoratif "--- OPSI 1: ... ---" atau "--- KONSEP VISUAL 1: ... ---"
+      if (
+        /^[-=*]{2,}\s*(opsi|pilihan|konsep(?:\s+visual)?)\s+\d+[^\n]*?[-=*]{2,}\s*$/i.test(
+          line
+        )
+      ) {
+        return false;
+      }
+
+      // Buang baris prompt AI image mentah atau parameter Midjourney
+      if (
+        /^(-\s*)?prompt\s+ai\s+(image|visual|video)[^\n]*:?$/i.test(line) ||
+        /--ar\s+\d+:\d+/i.test(line) ||
+        /\b(midjourney|dall-e|ideogram)\b/i.test(line)
+      ) {
+        return false;
+      }
+
+      // Untuk kanal teks & story, buang caption/hashtag/CTA/catatan visual
+      if (channel === "text" || channel === "story") {
+        if (
+          /^(caption(\s+slot\s+\w+)?|hashtag(s)?|tagar|rekomendasi\s+jam\s+unggah|call\s*-\s*to\s*-\s*action|cta|konsep\s+visual|deskripsi\s+visual|mood\s*&\s*warna|komposisi|sudut\s+pandang)\s*:/i.test(
+            line
+          )
+        ) {
+          return false;
+        }
+        const withoutTags = line.replace(/(?:^|\s)#[A-Za-z0-9_]+/g, "").trim();
+        if (!withoutTags && /#[A-Za-z0-9_]+/.test(line)) {
+          return false;
+        }
+      }
+
+      return true;
+    })
+    .map((line) => {
+      let cleanedLine = line;
+
+      // Bersihkan bullet & prefix label struktur agar jadi kalimat/paragraf langsung
+      cleanedLine = cleanedLine.replace(/^[-*•]+\s+/, "");
+      cleanedLine = cleanedLine.replace(/^\d+\.\s+/, "");
+      cleanedLine = cleanedLine.replace(
+        /^\[?(hook|hook\s+tema|draf\s+teks\s*\/\s*caption|draf\s+teks|caption|isi\s+utama|deskripsi\s+visual|mood\s*&\s*warna|komposisi)\]?\s*:\s*/i,
+        ""
+      );
+      cleanedLine = cleanedLine.replace(/^["“']+|["”']+$/g, "");
+
+      if (channel === "text" || channel === "story") {
+        cleanedLine = cleanedLine.replace(/\s+#[A-Za-z0-9_]+/g, "");
+      }
+
+      return cleanedLine.trim();
+    })
+    .filter((line, idx, arr) => {
+      // Cegah baris duplikat persis berurutan
+      if (idx > 0 && line && line === arr[idx - 1]) return false;
+      return true;
+    });
+
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function extractCleanTitleFromContent(content: string, fallback: string): string {
-  const hookMatch = content.match(/Hook\s*:\s*["“']?([^"\n”']+)["”']?/i);
-  if (hookMatch?.[1]?.trim()) {
-    return hookMatch[1].trim().slice(0, 95);
-  }
-
-  const titleMatch = content.match(
-    /(?:Sudut\s*Pandang\/)?Judul\s*:\s*["“']?([^"\n”']+)["”']?/i
-  );
-  if (titleMatch?.[1]?.trim()) {
-    return titleMatch[1].trim().slice(0, 95);
-  }
-
   const lines = content
     .split("\n")
-    .map((l) => l.replace(/^[-*#=]+\s*/, "").trim())
+    .map((l) => l.replace(/^[-*#=:\[\]]+\s*/, "").trim())
     .filter(
       (l) =>
         l.length > 8 &&
-        !/^(slot\s+(pagi|siang|sore|malam)|isi utama|caption slot|audit konten|berikut adalah)/i.test(
+        !/^(slot\s+(pagi|siang|sore|malam)|isi utama|caption slot|audit konten|berikut adalah|opsi\s+\d+|konsep\s+visual\s+\d+)/i.test(
           l
         )
     );
 
   if (lines[0]) {
-    return lines[0].slice(0, 95);
+    return lines[0].slice(0, 90);
   }
 
   return fallback;
@@ -528,16 +562,9 @@ function buildReadyPublishItems(tasks: TaskWithPayloads[]): ReadyPublishItem[] {
       const rawMerged =
         g.channel === "text" || g.channel === "story"
           ? [...g.textParts, ...g.otherParts].join("\n\n")
-          : [
-              ...g.textParts,
-              ...g.marketingParts,
-              ...g.otherParts,
-              ...(g.qualityParts.length > 0
-                ? [`Catatan Audit Kualitas:\n${g.qualityParts.join("\n")}`]
-                : []),
-            ].join("\n\n");
+          : [...g.textParts, ...g.marketingParts, ...g.otherParts].join("\n\n");
 
-      const formattedBody = formatContentByChannel(g.channel, rawMerged);
+      const formattedBody = finalizeContentByChannel(g.channel, rawMerged);
 
       const slotSuffix =
         g.slotKey === "sore"
@@ -553,7 +580,7 @@ function buildReadyPublishItems(tasks: TaskWithPayloads[]): ReadyPublishItem[] {
       const primary = g.primaryTask!;
       const headline = extractCleanTitleFromContent(
         formattedBody || rawMerged,
-        `Konten Siap Tayang${slotSuffix}`
+        `Konten Jadi${slotSuffix}`
       );
 
       return {
@@ -759,7 +786,7 @@ export function ContentStudioWorkspace() {
 
     const finalChannel = draftChannels[item.id] ?? item.channel;
     const rawDraft = (draftTexts[item.id] ?? item.contentText).trim();
-    const finalText = formatContentByChannel(finalChannel, rawDraft);
+    const finalText = finalizeContentByChannel(finalChannel, rawDraft);
     const finalMedia = (draftMediaUrls[item.id] ?? item.mediaUrl).trim();
 
     if (finalChannel === "story" && !isValidMediaUrl(finalMedia)) {
@@ -1040,7 +1067,7 @@ export function ContentStudioWorkspace() {
             {tabItems.map((item) => {
               const currentChannel = draftChannels[item.id] ?? item.channel;
               const rawDraftText = draftTexts[item.id] ?? item.contentText;
-              const currentText = formatContentByChannel(
+              const currentText = finalizeContentByChannel(
                 currentChannel,
                 rawDraftText
               );
@@ -1064,7 +1091,7 @@ export function ContentStudioWorkspace() {
                           {item.title}
                         </span>
                         <Badge variant={isReady ? "emerald" : "blue"}>
-                          {isReady ? "Siap Publish" : "Draf Siap Rilis"}
+                          {isReady ? "Siap Publish" : "Konten Jadi"}
                         </Badge>
                         <Badge
                           variant={currentChannel === "story" ? "purple" : "blue"}
@@ -1091,7 +1118,7 @@ export function ContentStudioWorkspace() {
                           }));
                           setDraftTexts((prev) => ({
                             ...prev,
-                            [item.id]: formatContentByChannel(
+                            [item.id]: finalizeContentByChannel(
                               nextCh,
                               prev[item.id] ?? item.contentText
                             ),
@@ -1157,8 +1184,8 @@ export function ContentStudioWorkspace() {
                     }
                     placeholder={
                       currentChannel === "text" || currentChannel === "story"
-                        ? "Isi teks motivasi / kata-kata / langkah-langkah / tutorial (tanpa caption & hashtag)..."
-                        : "Isi caption + hashtag..."
+                        ? "Teks jadi siap tayang..."
+                        : "Caption + hashtag siap tayang..."
                     }
                     className="w-full rounded-xl border border-slate-700/70 bg-slate-950/80 p-3 text-xs leading-relaxed text-slate-200 focus:border-blue-500 focus:outline-none"
                   />
