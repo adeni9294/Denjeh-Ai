@@ -224,6 +224,13 @@ export async function POST(
 
     const isVideoFormat = agentCode === "video" || division === "reels";
 
+    const singleFinalOutputRule = `
+ATURAN KELUARAN TUNGGAL & KONTEN JADI (WAJIB DIPATUHI):
+1. Tulis HANYA SATU VERSI FINAL yang langsung siap dipakai/diposting. DILARANG keras memberikan beberapa opsi atau pilihan (seperti "Opsi 1", "Opsi 2", "Opsi 3", "Pilihan 1/2/3", "Konsep 1/2", atau "Konsep Visual 1/2").
+2. DILARANG menulis kalimat pengantar, penutup meta, atau penjelasan proses (seperti "Berikut adalah 3 pilihan...", "Berikut draf yang siap diunggah...", atau catatan audit/penjelasan tambahan).
+3. DILARANG menulis label struktur mentah seperti "[HOOK]:", "Sudut Pandang:", "Hook Tema:", "Draf Teks/Caption:", "Deskripsi Visual:", "Mood & Warna:", atau "Komposisi:". Langsung sajikan isi finalnya.
+4. Kembalikan cukup 1 objek elemen di array "steps" (stepNumber: 1) berisi hasil akhir yang sudah matang dan siap tayang.`;
+
     const videoMasterPromptTemplate = isVideoFormat
       ? `
 KHUSUS VIDEO / REELS — ATURAN WAJIB MASTER PROMPT UTUH PER KLIP:
@@ -286,13 +293,15 @@ STRICT CONTINUITY:
 NEGATIVE PROMPT:
 [Daftar larangan visual/animasi/distorsi wajah/perubahan kostum]`
       : `
+${singleFinalOutputRule}
+
 ATURAN FORMAT NON-VIDEO (WAJIB DIPATUHI):
 1. Tugas ini BUKAN skrip/prompt video berdurasi detik kecuali pengguna secara eksplisit meminta video/reels.
 2. JANGAN menulis label durasi detik (0-2s, 15 detik, dll.), pergerakan kamera video, atau template master prompt adegan video.
-3. Sesuaikan format keluaran dengan jenis tugasnya:
-   - Jika tugas teks/ide/artikel/caption: tulis draf teks atau daftar ide yang rapi, jelas, dan langsung siap pakai dalam bahasa Indonesia.
-   - Jika tugas foto/gambar/visual: tulis konsep visual gambar tunggal dan prompt gambar statis (bukan timeline video).
-   - Jika tugas story: tulis konsep/teks singkat yang padat dan menarik.`;
+3. Sesuaikan format keluaran tunggal dengan jenis tugasnya:
+  - Jika tugas teks/ide/artikel/story: tulis 1 teks jadi yang mengalir, natural, dan siap baca dalam bahasa Indonesia (tanpa opsi 1/2/3, tanpa tagar/CTA jika teks murni/story).
+  - Jika tugas foto/gambar/visual: tulis 1 konsep visual tunggal yang padat dan jelas tanpa daftar pilihan konsep dan tanpa parameter mentah Midjourney/DALL-E.
+  - Jika tugas marketing/caption: tulis 1 caption final + hashtag relevan yang siap tempel.`;
 
     const systemPrompt = `Anda adalah ${agentName} dalam sistem DENJEH AI.
 Hasilkan keluaran nyata, detail, dan siap pakai sesuai tugas agen Anda dalam format JSON murni.
@@ -302,14 +311,14 @@ ${videoMasterPromptTemplate}
 
 WAJIB kembalikan JSON valid dengan skema persis seperti ini:
 {
-  "intentSummary": "Ringkasan hasil kerja agen secara jelas dalam bahasa Indonesia",
+  "intentSummary": "Ringkasan singkat 1 kalimat hasil kerja agen dalam bahasa Indonesia",
   "recommendedMode": "manual",
   "steps": [
     {
       "stepNumber": 1,
       "agentCode": "${agentCode}",
       "agentName": "${agentName}",
-      "action": "Isi detail / hasil kerja agen ini secara lengkap dan siap pakai",
+      "action": "Tulis HANYA 1 hasil final yang matang dan siap pakai sesuai aturan",
       "dependsOn": "${String(payload.dependsOn || "Previous Steps")}",
       "estimatedOutput": "${estimatedOutput}"
     }
@@ -351,8 +360,12 @@ ${estimatedOutput}`;
       preferredModel,
     });
 
-    const formattedStepsText = isVideoFormat
+    const normalizedSteps = isVideoFormat
       ? result.steps
+      : result.steps.slice(0, 1);
+
+    const formattedStepsText = isVideoFormat
+      ? normalizedSteps
           .map(
             (s) =>
               `=== CLIP #${String(s.stepNumber).padStart(2, "0")} ===\n${
@@ -360,8 +373,9 @@ ${estimatedOutput}`;
               }`
           )
           .join("\n\n----------------------------------------\n\n")
-      : result.steps
-          .map((s) => `${s.stepNumber}. ${s.action}`)
+      : normalizedSteps
+          .map((s) => String(s.action ?? "").trim())
+          .filter(Boolean)
           .join("\n\n");
 
     const outputPayload = {
@@ -369,7 +383,7 @@ ${estimatedOutput}`;
       deliverableType: estimatedOutput,
       division,
       contentMarkdown: formattedStepsText || result.intentSummary,
-      steps: result.steps,
+      steps: normalizedSteps,
       providerUsed: result.providerUsed,
       modelUsed: result.modelUsed,
       agentCode,
