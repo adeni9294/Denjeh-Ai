@@ -11,6 +11,7 @@ interface FacebookPublishRequest {
   pageId?: string;
   accessToken?: string;
   publishType?: PublishChannelType;
+  slotKind?: "story" | "photo" | "text" | "reels";
   caption?: string;
   videoUrl?: string;
   photoUrl?: string;
@@ -18,6 +19,38 @@ interface FacebookPublishRequest {
 }
 
 const GRAPH_API_VERSION = "v21.0";
+
+async function updateTaskPublishCheckpoint(params: {
+  supabase: NonNullable<Awaited<ReturnType<typeof createSupabaseServerClient>>>;
+  taskId: string;
+  userId: string;
+  patch: Record<string, unknown>;
+}) {
+  const { supabase, taskId, userId, patch } = params;
+  const { data: existingTask } = await supabase
+    .from("tasks")
+    .select("checkpoint_state")
+    .eq("id", taskId)
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  const prevCheckpoint =
+    existingTask?.checkpoint_state &&
+    typeof existingTask.checkpoint_state === "object"
+      ? (existingTask.checkpoint_state as Record<string, unknown>)
+      : {};
+
+  await supabase
+    .from("tasks")
+    .update({
+      checkpoint_state: {
+        ...prevCheckpoint,
+        ...patch,
+      },
+    })
+    .eq("id", taskId)
+    .eq("user_id", userId);
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -271,50 +304,56 @@ export async function POST(req: NextRequest) {
     };
 
     if (!fbRes.ok || fbData.error) {
+      const fbErrorMessage =
+        fbData.error?.message ||
+        `Facebook Graph API gagal merespons (HTTP ${fbRes.status}).`;
+
+      if (body.taskId) {
+        await updateTaskPublishCheckpoint({
+          supabase,
+          taskId: body.taskId,
+          userId: user.id,
+          patch: {
+            publishStatus: "failed",
+            publishError: fbErrorMessage,
+            facebookPublishType: publishType,
+          },
+        });
+      }
+
       return NextResponse.json(
         {
-          error:
-            fbData.error?.message ||
-            `Facebook Graph API gagal merespons (HTTP ${fbRes.status}).`,
+          error: fbErrorMessage,
         },
         { status: 400 }
       );
     }
 
     const publishedPostId = fbData.post_id || fbData.id || "published";
+    const publishedAtIso = new Date().toISOString();
 
     if (body.taskId) {
-      const { data: existingTask } = await supabase
-        .from("tasks")
-        .select("checkpoint_state")
-        .eq("id", body.taskId)
-        .eq("user_id", user.id)
-        .maybeSingle();
-
-      const prevCheckpoint =
-        existingTask?.checkpoint_state &&
-        typeof existingTask.checkpoint_state === "object"
-          ? (existingTask.checkpoint_state as Record<string, unknown>)
-          : {};
-
-      await supabase
-        .from("tasks")
-        .update({
-          checkpoint_state: {
-            ...prevCheckpoint,
-            facebookPublishedAt: new Date().toISOString(),
-            facebookPostId: publishedPostId,
-            facebookPublishType: publishType,
-          },
-        })
-        .eq("id", body.taskId)
-        .eq("user_id", user.id);
+      await updateTaskPublishCheckpoint({
+        supabase,
+        taskId: body.taskId,
+        userId: user.id,
+        patch: {
+          publishedAt: publishedAtIso,
+          facebookPublishedAt: publishedAtIso,
+          facebookPostId: publishedPostId,
+          facebookPublishType: publishType,
+          publishStatus: "published",
+          publishError: null,
+          ...(body.slotKind ? { slotKind: body.slotKind } : {}),
+        },
+      });
     }
 
     return NextResponse.json({
       ok: true,
       postId: publishedPostId,
       publishType,
+      publishedAt: publishedAtIso,
     });
   } catch (err) {
     return NextResponse.json(
