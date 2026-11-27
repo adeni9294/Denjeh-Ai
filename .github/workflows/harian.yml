@@ -12,7 +12,7 @@ jobs:
   trigger-daily-publish:
     runs-on: ubuntu-latest
     steps:
-- name: Call DENJEH AI Daily Publish Endpoint
+      - name: Call DENJEH AI Daily Publish Endpoint
         run: |
           BODY_FILE=$(mktemp)
           CODE=$(curl -s -o "$BODY_FILE" -w "%{http_code}" -X POST \
