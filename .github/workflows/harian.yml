@@ -1,0 +1,20 @@
+name: Daily Auto Publish WIB
+
+on:
+  schedule:
+    - cron: "0 1 * * *"   # 08:00 WIB
+    - cron: "0 4 * * *"   # 11:00 WIB
+    - cron: "0 8 * * *"   # 15:00 WIB
+    - cron: "0 12 * * *"  # 19:00 WIB
+  workflow_dispatch:
+
+jobs:
+  trigger-daily-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call DENJEH AI Daily Publish Endpoint
+        run: |
+          curl --fail --silent --show-error -X POST \
+            "https://denjeh-ai.adeni9294.workers.dev/api/cron/daily-publish" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json"
