@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 type PublishChannelType = "reels" | "photo" | "text";
+type PublishTargetType = "story" | "feed";
 type PublishActionType = "publish" | "save_credentials" | "clear_credentials";
 
 interface FacebookPublishRequest {
@@ -10,7 +11,8 @@ interface FacebookPublishRequest {
   taskId?: string | null;
   pageId?: string;
   accessToken?: string;
-  publishType?: PublishChannelType;
+  publishType?: PublishChannelType | "story_photo" | "story_video";
+  publishTarget?: PublishTargetType;
   slotKind?: "story" | "photo" | "text" | "reels";
   caption?: string;
   videoUrl?: string;
@@ -19,6 +21,12 @@ interface FacebookPublishRequest {
 }
 
 const GRAPH_API_VERSION = "v21.0";
+
+function isValidHttpUrl(raw: string): boolean {
+  const value = raw.trim();
+  if (!value || value.includes("...")) return false;
+  return /^https?:\/\/[^\s]+$/i.test(value);
+}
 
 async function updateTaskPublishCheckpoint(params: {
   supabase: NonNullable<Awaited<ReturnType<typeof createSupabaseServerClient>>>;
@@ -50,6 +58,107 @@ async function updateTaskPublishCheckpoint(params: {
     })
     .eq("id", taskId)
     .eq("user_id", userId);
+}
+
+async function publishVideoStoryToPage(params: {
+  pageId: string;
+  accessToken: string;
+  videoUrl: string;
+}): Promise<{ ok: boolean; id?: string; error?: string }> {
+  const { pageId, accessToken, videoUrl } = params;
+  const storyEndpoint = `https://graph.facebook.com/${GRAPH_API_VERSION}/${encodeURIComponent(
+    pageId
+  )}/video_stories`;
+
+  const startParams = new URLSearchParams();
+  startParams.set("access_token", accessToken);
+  startParams.set("upload_phase", "start");
+
+  const startRes = await fetch(storyEndpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: startParams.toString(),
+  });
+
+  const startData = (await startRes.json()) as {
+    video_id?: string;
+    upload_url?: string;
+    error?: { message?: string };
+  };
+
+  if (!startRes.ok || startData.error || !startData.video_id || !startData.upload_url) {
+    return {
+      ok: false,
+      error:
+        startData.error?.message ||
+        "Gagal memulai sesi unggah Video Story ke Facebook Page.",
+    };
+  }
+
+  const videoFileRes = await fetch(videoUrl);
+  if (!videoFileRes.ok) {
+    return {
+      ok: false,
+      error: `Gagal mengunduh file video Story dari URL (HTTP ${videoFileRes.status}).`,
+    };
+  }
+
+  const videoBuffer = await videoFileRes.arrayBuffer();
+  const uploadRes = await fetch(startData.upload_url, {
+    method: "POST",
+    headers: {
+      Authorization: `OAuth ${accessToken}`,
+      offset: "0",
+      file_size: String(videoBuffer.byteLength),
+      "Content-Type": "application/octet-stream",
+    },
+    body: videoBuffer,
+  });
+
+  const uploadData = (await uploadRes.json().catch(() => ({}))) as {
+    error?: { message?: string };
+  };
+
+  if (!uploadRes.ok || uploadData.error) {
+    return {
+      ok: false,
+      error:
+        uploadData.error?.message ||
+        "Gagal mengunggah binary video Story ke Facebook Page.",
+    };
+  }
+
+  const finishParams = new URLSearchParams();
+  finishParams.set("access_token", accessToken);
+  finishParams.set("upload_phase", "finish");
+  finishParams.set("video_id", startData.video_id);
+
+  const finishRes = await fetch(storyEndpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: finishParams.toString(),
+  });
+
+  const finishData = (await finishRes.json()) as {
+    id?: string;
+    post_id?: string;
+    success?: boolean;
+    error?: { message?: string };
+  };
+
+  if (!finishRes.ok || finishData.error) {
+    return {
+      ok: false,
+      error:
+        finishData.error?.message ||
+        "Gagal menyelesaikan publikasi Video Story ke Facebook Page.",
+    };
+  }
+
+  return {
+    ok: true,
+    id: finishData.post_id || finishData.id || startData.video_id,
+  };
 }
 
 export async function POST(req: NextRequest) {
@@ -166,10 +275,23 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    const rawPublishType = String(body.publishType ?? "").toLowerCase().trim();
+    const rawSlotKind = String(body.slotKind ?? "").toLowerCase().trim();
+    const rawTarget = String(body.publishTarget ?? "").toLowerCase().trim();
+
+    const isStoryTarget =
+      rawTarget === "story" ||
+      rawSlotKind === "story" ||
+      rawPublishType === "story_photo" ||
+      rawPublishType === "story_video";
+
     const publishType: PublishChannelType =
-      body.publishType === "reels" || body.publishType === "photo"
-        ? body.publishType
+      rawPublishType === "reels" || rawPublishType === "story_video"
+        ? "reels"
+        : rawPublishType === "photo" || rawPublishType === "story_photo"
+        ? "photo"
         : "text";
+
     const caption = (body.caption ?? "").trim();
     const videoUrl = (body.videoUrl ?? "").trim();
     const photoUrl = (body.photoUrl ?? "").trim();
@@ -239,6 +361,161 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // Proteksi khusus target Story: dilarang keras jatuh ke /feed atau /photos publik
+    if (isStoryTarget) {
+      const storyMediaUrl = videoUrl || photoUrl;
+      const isVideoStory =
+        rawPublishType === "story_video" ||
+        publishType === "reels" ||
+        /\.mp4(\?|$)/i.test(storyMediaUrl);
+
+      if (!isValidHttpUrl(storyMediaUrl)) {
+        const msg =
+          "Publikasi Story diblokir: URL media gambar/video yang valid wajib ada agar Story tidak salah terkirim ke feed publik.";
+        if (body.taskId) {
+          await updateTaskPublishCheckpoint({
+            supabase,
+            taskId: body.taskId,
+            userId: user.id,
+            patch: {
+              publishStatus: "failed",
+              publishError: msg,
+              publishTarget: "story",
+              slotKind: "story",
+            },
+          });
+        }
+        return NextResponse.json({ error: msg }, { status: 400 });
+      }
+
+      if (isVideoStory) {
+        const vidResult = await publishVideoStoryToPage({
+          pageId,
+          accessToken,
+          videoUrl: storyMediaUrl,
+        });
+
+        if (!vidResult.ok) {
+          const errMsg = vidResult.error || "Gagal mempublikasikan Video Story.";
+          if (body.taskId) {
+            await updateTaskPublishCheckpoint({
+              supabase,
+              taskId: body.taskId,
+              userId: user.id,
+              patch: {
+                publishStatus: "failed",
+                publishError: errMsg,
+                publishTarget: "story",
+                slotKind: "story",
+              },
+            });
+          }
+          return NextResponse.json({ error: errMsg }, { status: 400 });
+        }
+
+        const publishedAtIso = new Date().toISOString();
+        const publishedPostId = vidResult.id || "story_video_published";
+
+        if (body.taskId) {
+          await updateTaskPublishCheckpoint({
+            supabase,
+            taskId: body.taskId,
+            userId: user.id,
+            patch: {
+              publishedAt: publishedAtIso,
+              facebookPublishedAt: publishedAtIso,
+              facebookPostId: publishedPostId,
+              facebookPublishType: "story_video",
+              publishTarget: "story",
+              slotKind: "story",
+              publishStatus: "published",
+              publishError: null,
+            },
+          });
+        }
+
+        return NextResponse.json({
+          ok: true,
+          postId: publishedPostId,
+          publishTarget: "story",
+          publishType: "story_video",
+          publishedAt: publishedAtIso,
+        });
+      }
+
+      const photoStoryEndpoint = `https://graph.facebook.com/${GRAPH_API_VERSION}/${encodeURIComponent(
+        pageId
+      )}/photo_stories`;
+      const photoStoryParams = new URLSearchParams();
+      photoStoryParams.set("access_token", accessToken);
+      photoStoryParams.set("url", storyMediaUrl);
+
+      const storyRes = await fetch(photoStoryEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: photoStoryParams.toString(),
+      });
+
+      const storyData = (await storyRes.json()) as {
+        id?: string;
+        post_id?: string;
+        error?: { message?: string };
+      };
+
+      if (!storyRes.ok || storyData.error) {
+        const errMsg =
+          storyData.error?.message ||
+          `Facebook Photo Story API gagal merespons (HTTP ${storyRes.status}).`;
+
+        if (body.taskId) {
+          await updateTaskPublishCheckpoint({
+            supabase,
+            taskId: body.taskId,
+            userId: user.id,
+            patch: {
+              publishStatus: "failed",
+              publishError: errMsg,
+              publishTarget: "story",
+              slotKind: "story",
+            },
+          });
+        }
+
+        return NextResponse.json({ error: errMsg }, { status: 400 });
+      }
+
+      const publishedPostId =
+        storyData.post_id || storyData.id || "story_photo_published";
+      const publishedAtIso = new Date().toISOString();
+
+      if (body.taskId) {
+        await updateTaskPublishCheckpoint({
+          supabase,
+          taskId: body.taskId,
+          userId: user.id,
+          patch: {
+            publishedAt: publishedAtIso,
+            facebookPublishedAt: publishedAtIso,
+            facebookPostId: publishedPostId,
+            facebookPublishType: "story_photo",
+            publishTarget: "story",
+            slotKind: "story",
+            publishStatus: "published",
+            publishError: null,
+          },
+        });
+      }
+
+      return NextResponse.json({
+        ok: true,
+        postId: publishedPostId,
+        publishTarget: "story",
+        publishType: "story_photo",
+        publishedAt: publishedAtIso,
+      });
+    }
+
+    // Jalur Feed / Reels publik (bukan Story)
     let graphEndpoint = `https://graph.facebook.com/${GRAPH_API_VERSION}/${encodeURIComponent(
       pageId
     )}/feed`;
@@ -316,6 +593,7 @@ export async function POST(req: NextRequest) {
           patch: {
             publishStatus: "failed",
             publishError: fbErrorMessage,
+            publishTarget: "feed",
             facebookPublishType: publishType,
           },
         });
@@ -342,6 +620,7 @@ export async function POST(req: NextRequest) {
           facebookPublishedAt: publishedAtIso,
           facebookPostId: publishedPostId,
           facebookPublishType: publishType,
+          publishTarget: "feed",
           publishStatus: "published",
           publishError: null,
           ...(body.slotKind ? { slotKind: body.slotKind } : {}),
@@ -352,6 +631,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       ok: true,
       postId: publishedPostId,
+      publishTarget: "feed",
       publishType,
       publishedAt: publishedAtIso,
     });
