@@ -52,12 +52,13 @@ interface ReadyPublishItem {
 const PUBLISH_TABS: {
   key: ReadyPublishTabKey;
   label: string;
+  outputLabel: string;
   slotTime: string;
 }[] = [
-  { key: "story", label: "Story", slotTime: "08.00 WIB" },
-  { key: "text", label: "Teks", slotTime: "15.00 WIB" },
-  { key: "photo", label: "Foto", slotTime: "11.00 WIB" },
-  { key: "reels", label: "Reels", slotTime: "19.00 WIB" },
+  { key: "story", label: "Story", outputLabel: "Foto / Teks", slotTime: "08.00 WIB" },
+  { key: "photo", label: "Foto", outputLabel: "Foto + Caption & Hashtag", slotTime: "11.00 WIB" },
+  { key: "text", label: "Teks", outputLabel: "Teks Murni (Tanpa Caption/Hashtag)", slotTime: "15.00 WIB" },
+  { key: "reels", label: "Reels", outputLabel: "Video + Caption & Hashtag", slotTime: "19.00 WIB" },
 ];
 
 function cleanReadableText(raw: string, fallbackTitle: string): string {
@@ -70,6 +71,51 @@ function cleanReadableText(raw: string, fallbackTitle: string): string {
     .trim();
 
   return normalized || fallbackTitle;
+}
+
+/**
+ * Untuk kanal 'text' dan 'story', hapus bagian caption, tagar/hashtag, dan CTA promosi
+ * agar hanya menyisakan teks motivasi / kata-kata / langkah-langkah / tutorial.
+ */
+function sanitizePureTextContent(raw: string): string {
+  const lines = raw
+    .replace(/\\n/g, "\n")
+    .replace(/\\r/g, "")
+    .replace(/\*\*/g, "")
+    .split("\n")
+    .map((line) => line.trim());
+
+  const filtered = lines.filter((line) => {
+    if (!line) return true;
+    if (/^(caption(\s+slot\s+\w+)?|hashtag(s)?|tagar|rekomendasi\s+jam\s+unggah|call\s*-\s*to\s*-\s*action|cta)\s*:/i.test(line)) {
+      return false;
+    }
+    const withoutTags = line.replace(/(?:^|\s)#[A-Za-z0-9_]+/g, "").trim();
+    if (!withoutTags && /#[A-Za-z0-9_]+/.test(line)) {
+      return false;
+    }
+    return true;
+  });
+
+  const strippedTagsLines = filtered.map((line) =>
+    line.replace(/\s+#[A-Za-z0-9_]+/g, "").trim()
+  );
+
+  return strippedTagsLines
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function formatContentByChannel(channel: ReadyPublishTabKey, raw: string): string {
+  const cleaned = cleanReadableText(raw, "");
+  if (!cleaned) return "";
+
+  if (channel === "text" || channel === "story") {
+    return sanitizePureTextContent(cleaned);
+  }
+
+  return cleaned;
 }
 
 function extractCleanTitleFromContent(content: string, fallback: string): string {
@@ -447,14 +493,19 @@ function buildReadyPublishItems(tasks: TaskWithPayloads[]): ReadyPublishItem[] {
     )
     .sort((a, b) => (slotRank[a.slotKey] ?? 9) - (slotRank[b.slotKey] ?? 9))
     .map((g) => {
-      const mergedBody = [
-        ...g.textParts,
-        ...g.marketingParts,
-        ...g.otherParts,
-        ...(g.qualityParts.length > 0
-          ? [`Catatan Audit Kualitas:\n${g.qualityParts.join("\n")}`]
-          : []),
-      ].join("\n\n");
+      const rawMerged =
+        g.channel === "text" || g.channel === "story"
+          ? [...g.textParts, ...g.otherParts].join("\n\n")
+          : [
+              ...g.textParts,
+              ...g.marketingParts,
+              ...g.otherParts,
+              ...(g.qualityParts.length > 0
+                ? [`Catatan Audit Kualitas:\n${g.qualityParts.join("\n")}`]
+                : []),
+            ].join("\n\n");
+
+      const formattedBody = formatContentByChannel(g.channel, rawMerged);
 
       const slotSuffix =
         g.slotKey === "sore"
@@ -469,7 +520,7 @@ function buildReadyPublishItems(tasks: TaskWithPayloads[]): ReadyPublishItem[] {
 
       const primary = g.primaryTask!;
       const headline = extractCleanTitleFromContent(
-        mergedBody,
+        formattedBody || rawMerged,
         `Konten Siap Tayang${slotSuffix}`
       );
 
@@ -483,7 +534,7 @@ function buildReadyPublishItems(tasks: TaskWithPayloads[]): ReadyPublishItem[] {
         channel: g.channel,
         slotTimeLabel: getSlotScheduleLabel(g.slotKey, g.channel),
         title: `${headline}${slotSuffix}`,
-        contentText: mergedBody,
+        contentText: formattedBody,
         mediaUrl: g.mediaUrl,
         isReadyToPublish: g.isReadyToPublish,
         checkpointState: g.checkpointState,
@@ -675,10 +726,11 @@ export function ContentStudioWorkspace() {
     setInfoMsg(null);
 
     const finalChannel = draftChannels[item.id] ?? item.channel;
-    const finalText = (draftTexts[item.id] ?? item.contentText).trim();
+    const rawDraft = (draftTexts[item.id] ?? item.contentText).trim();
+    const finalText = formatContentByChannel(finalChannel, rawDraft);
     const finalMedia = (draftMediaUrls[item.id] ?? item.mediaUrl).trim();
 
-    if (!finalText) {
+    if (!finalText && !finalMedia) {
       setErrorMsg("Konten siap publish tidak boleh kosong.");
       setSavingId(null);
       return;
@@ -732,9 +784,10 @@ export function ContentStudioWorkspace() {
           targetIdSet.has(t.id) ? { ...t, checkpoint_state: nextCheckpoint } : t
         )
       );
+      setDraftTexts((prev) => ({ ...prev, [item.id]: finalText }));
       setSavedIds((prev) => ({ ...prev, [item.id]: true }));
       setInfoMsg(
-        `Konten "${item.title}" ditandai Siap Publish untuk tab ${finalChannel.toUpperCase()} (${item.slotTimeLabel}).`
+        `Konten "${item.title}" ditandai Siap Publish untuk kanal ${finalChannel.toUpperCase()} (${item.slotTimeLabel}).`
       );
     } catch (err) {
       setErrorMsg(
@@ -753,6 +806,9 @@ export function ContentStudioWorkspace() {
     if (key === "photo") return <ImageIcon className="h-3.5 w-3.5" />;
     return <Film className="h-3.5 w-3.5" />;
   };
+
+  const activeTabMeta =
+    PUBLISH_TABS.find((t) => t.key === activeTab) ?? PUBLISH_TABS[2];
 
   return (
     <div className="space-y-4">
@@ -876,14 +932,17 @@ export function ContentStudioWorkspace() {
           <div className="flex items-center gap-2">
             <Sparkles className="h-4 w-4 text-emerald-400" />
             <h2 className="text-base font-semibold">
-              Konten Siap Publish —{" "}
-              {PUBLISH_TABS.find((t) => t.key === activeTab)?.label} (
-              {tabItems.length})
+              Konten Siap Publish — {activeTabMeta.label} ({tabItems.length})
             </h2>
           </div>
-          <Badge variant="emerald">
-            Slot {getSlotTimeForChannel(activeTab)}
-          </Badge>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[11px] text-slate-400">
+              Output: {activeTabMeta.outputLabel}
+            </span>
+            <Badge variant="emerald">
+              Slot {getSlotTimeForChannel(activeTab)}
+            </Badge>
+          </div>
         </div>
 
         {loading ? (
@@ -894,10 +953,7 @@ export function ContentStudioWorkspace() {
           <div className="py-8 text-center space-y-2">
             <p className="text-xs text-slate-400">
               Belum ada konten siap publish untuk tab{" "}
-              <strong className="text-slate-200">
-                {PUBLISH_TABS.find((t) => t.key === activeTab)?.label}
-              </strong>
-              .
+              <strong className="text-slate-200">{activeTabMeta.label}</strong>.
             </p>
             <p className="text-[11px] text-slate-500">
               Anda juga bisa memindahkan item dari tab lain melalui dropdown
@@ -907,9 +963,13 @@ export function ContentStudioWorkspace() {
         ) : (
           <div className="space-y-3">
             {tabItems.map((item) => {
-              const currentText = draftTexts[item.id] ?? item.contentText;
-              const currentMedia = draftMediaUrls[item.id] ?? item.mediaUrl;
               const currentChannel = draftChannels[item.id] ?? item.channel;
+              const rawDraftText = draftTexts[item.id] ?? item.contentText;
+              const currentText = formatContentByChannel(
+                currentChannel,
+                rawDraftText
+              );
+              const currentMedia = draftMediaUrls[item.id] ?? item.mediaUrl;
               const isCopied = copiedId === item.id;
               const isSaving = savingId === item.id;
               const isReady =
@@ -939,19 +999,27 @@ export function ContentStudioWorkspace() {
                     <div className="flex items-center gap-1.5 flex-wrap shrink-0">
                       <select
                         value={currentChannel}
-                        onChange={(e) =>
+                        onChange={(e) => {
+                          const nextCh = e.target.value as ReadyPublishTabKey;
                           setDraftChannels((prev) => ({
                             ...prev,
-                            [item.id]: e.target.value as ReadyPublishTabKey,
-                          }))
-                        }
+                            [item.id]: nextCh,
+                          }));
+                          setDraftTexts((prev) => ({
+                            ...prev,
+                            [item.id]: formatContentByChannel(
+                              nextCh,
+                              prev[item.id] ?? item.contentText
+                            ),
+                          }));
+                        }}
                         aria-label={`Pindahkan kanal untuk ${item.title}`}
                         className="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] text-slate-200"
                       >
-                        <option value="story">Tab Story</option>
-                        <option value="text">Tab Teks</option>
-                        <option value="photo">Tab Foto</option>
-                        <option value="reels">Tab Reels</option>
+                        <option value="story">Tab Story (Foto / Teks)</option>
+                        <option value="photo">Tab Foto (Foto + Caption & Hashtag)</option>
+                        <option value="text">Tab Teks (Teks Murni)</option>
+                        <option value="reels">Tab Reels (Video + Caption & Hashtag)</option>
                       </select>
 
                       <button
@@ -998,6 +1066,11 @@ export function ContentStudioWorkspace() {
                         ...prev,
                         [item.id]: e.target.value,
                       }))
+                    }
+                    placeholder={
+                      currentChannel === "text" || currentChannel === "story"
+                        ? "Isi teks motivasi / kata-kata / langkah-langkah / tutorial (tanpa caption & hashtag)..."
+                        : "Isi caption + hashtag..."
                     }
                     className="w-full rounded-xl border border-slate-700/70 bg-slate-950/80 p-3 text-xs leading-relaxed text-slate-200 focus:border-blue-500 focus:outline-none"
                   />
