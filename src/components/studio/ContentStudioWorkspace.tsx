@@ -36,6 +36,7 @@ type WorkflowRunWithPlan = DbWorkflowRun & {
 interface ReadyPublishItem {
   id: string;
   taskId: string;
+  sourceTaskIds: string[];
   projectId: string | null;
   workflowRunId: string | null;
   stepOrder: number;
@@ -69,6 +70,126 @@ function cleanReadableText(raw: string, fallbackTitle: string): string {
     .trim();
 
   return normalized || fallbackTitle;
+}
+
+function extractCleanTitleFromContent(content: string, fallback: string): string {
+  const hookMatch = content.match(/Hook\s*:\s*["“']?([^"\n”']+)["”']?/i);
+  if (hookMatch?.[1]?.trim()) {
+    return hookMatch[1].trim().slice(0, 95);
+  }
+
+  const titleMatch = content.match(
+    /(?:Sudut\s*Pandang\/)?Judul\s*:\s*["“']?([^"\n”']+)["”']?/i
+  );
+  if (titleMatch?.[1]?.trim()) {
+    return titleMatch[1].trim().slice(0, 95);
+  }
+
+  const lines = content
+    .split("\n")
+    .map((l) => l.replace(/^[-*#=]+\s*/, "").trim())
+    .filter(
+      (l) =>
+        l.length > 8 &&
+        !/^(slot\s+(pagi|siang|sore|malam)|isi utama|caption slot|audit konten|berikut adalah)/i.test(
+          l
+        )
+    );
+
+  if (lines[0]) {
+    return lines[0].slice(0, 95);
+  }
+
+  return fallback;
+}
+
+function detectAgentRole(
+  task: TaskWithPayloads
+): "idea" | "text" | "marketing" | "quality" | "media" | "other" {
+  const payload =
+    task.input_payload && typeof task.input_payload === "object"
+      ? (task.input_payload as Record<string, unknown>)
+      : {};
+  const out =
+    task.output_payload && typeof task.output_payload === "object"
+      ? (task.output_payload as Record<string, unknown>)
+      : {};
+
+  const code = String(
+    payload.agentCode ?? out.agentCode ?? task.agent_code ?? ""
+  )
+    .toLowerCase()
+    .trim();
+  const title = String(task.title ?? "").toLowerCase();
+
+  if (code === "idea" || title.startsWith("idea agent")) return "idea";
+  if (code === "quality" || title.startsWith("quality agent")) return "quality";
+  if (code === "marketing" || title.startsWith("marketing agent"))
+    return "marketing";
+  if (code === "text" || title.startsWith("text agent")) return "text";
+  if (["story", "photo", "visual", "reels", "video"].includes(code))
+    return "media";
+
+  return "other";
+}
+
+function splitSectionsBySlot(
+  rawText: string
+): Partial<Record<"pagi" | "siang" | "sore" | "malam", string>> {
+  const markers: {
+    key: "pagi" | "siang" | "sore" | "malam";
+    regex: RegExp;
+  }[] = [
+    {
+      key: "pagi",
+      regex:
+        /(?:===+\s*)?(?:KONSEP\s+KONTEN\s+|CAPTION\s+|AUDIT\s+KONTEN\s+)?SLOT\s+PAGI[^\n]*/i,
+    },
+    {
+      key: "siang",
+      regex:
+        /(?:===+\s*)?(?:KONSEP\s+KONTEN\s+|CAPTION\s+|AUDIT\s+KONTEN\s+)?SLOT\s+SIANG[^\n]*/i,
+    },
+    {
+      key: "sore",
+      regex:
+        /(?:===+\s*)?(?:KONSEP\s+KONTEN\s+|CAPTION\s+|AUDIT\s+KONTEN\s+)?SLOT\s+SORE[^\n]*/i,
+    },
+    {
+      key: "malam",
+      regex:
+        /(?:===+\s*)?(?:KONSEP\s+KONTEN\s+|CAPTION\s+|AUDIT\s+KONTEN\s+)?SLOT\s+MALAM[^\n]*/i,
+    },
+  ];
+
+  const found: {
+    key: "pagi" | "siang" | "sore" | "malam";
+    index: number;
+  }[] = [];
+
+  for (const m of markers) {
+    const match = m.regex.exec(rawText);
+    if (match && typeof match.index === "number") {
+      found.push({ key: m.key, index: match.index });
+    }
+  }
+
+  if (found.length === 0) return {};
+
+  found.sort((a, b) => a.index - b.index);
+  const result: Partial<Record<"pagi" | "siang" | "sore" | "malam", string>> =
+    {};
+
+  for (let i = 0; i < found.length; i++) {
+    const start = found[i].index;
+    const end = i + 1 < found.length ? found[i + 1].index : rawText.length;
+    const slice = rawText.slice(start, end).trim();
+    if (slice) {
+      result[found[i].key] = slice;
+    }
+  }
+
+  return result;
 }
 
 function inferPublishChannel(task: TaskWithPayloads): ReadyPublishTabKey {
@@ -132,10 +253,86 @@ function getSlotTimeForChannel(channel: ReadyPublishTabKey): string {
   );
 }
 
+function getSlotScheduleLabel(
+  slotKey: "pagi" | "siang" | "sore" | "malam" | "umum",
+  channel: ReadyPublishTabKey
+): string {
+  if (slotKey === "pagi") return "08.00 WIB";
+  if (slotKey === "siang") return "11.00 WIB";
+  if (slotKey === "sore") return "15.00 WIB";
+  if (slotKey === "malam") return "19.00 WIB";
+  return getSlotTimeForChannel(channel);
+}
+
 function buildReadyPublishItems(tasks: TaskWithPayloads[]): ReadyPublishItem[] {
-  const items: ReadyPublishItem[] = [];
+  type SlotGroup = {
+    groupKey: string;
+    runId: string | null;
+    slotKey: "pagi" | "siang" | "sore" | "malam" | "umum";
+    textParts: string[];
+    marketingParts: string[];
+    qualityParts: string[];
+    otherParts: string[];
+    sourceTaskIds: string[];
+    primaryTask?: TaskWithPayloads;
+    channel: ReadyPublishTabKey;
+    mediaUrl: string;
+    isReadyToPublish: boolean;
+    checkpointState: Record<string, unknown>;
+    stepOrder: number;
+  };
+
+  const groups = new Map<string, SlotGroup>();
+
+  const ensureGroup = (
+    runId: string | null,
+    slotKey: "pagi" | "siang" | "sore" | "malam" | "umum",
+    fallbackTask: TaskWithPayloads,
+    channel: ReadyPublishTabKey,
+    mediaUrl: string,
+    cp: Record<string, unknown>,
+    stepOrder: number
+  ): SlotGroup => {
+    const key = `${runId ?? "solo-${fallbackTask.id}"}::${slotKey}::${channel}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        groupKey: key,
+        runId,
+        slotKey,
+        textParts: [],
+        marketingParts: [],
+        qualityParts: [],
+        otherParts: [],
+        sourceTaskIds: [],
+        primaryTask: fallbackTask,
+        channel,
+        mediaUrl,
+        isReadyToPublish: Boolean(cp.readyToPublish || cp.scheduledForCron),
+        checkpointState: cp,
+        stepOrder,
+      });
+    }
+
+    const g = groups.get(key)!;
+    if (!g.sourceTaskIds.includes(fallbackTask.id)) {
+      g.sourceTaskIds.push(fallbackTask.id);
+    }
+    if (mediaUrl && !g.mediaUrl) {
+      g.mediaUrl = mediaUrl;
+    }
+    if (cp.readyToPublish || cp.scheduledForCron) {
+      g.isReadyToPublish = true;
+      g.checkpointState = cp;
+      g.primaryTask = fallbackTask;
+    }
+    return g;
+  };
 
   for (const task of tasks) {
+    const role = detectAgentRole(task);
+    // Abaikan Idea Agent agar ide mentah tidak muncul sebagai item siap publish
+    if (role === "idea") continue;
+
     const payload =
       task.input_payload && typeof task.input_payload === "object"
         ? (task.input_payload as Record<string, unknown>)
@@ -154,73 +351,145 @@ function buildReadyPublishItems(tasks: TaskWithPayloads[]): ReadyPublishItem[] {
     const photoUrl = String(cp.photoUrl ?? out.photoUrl ?? "").trim();
     const videoUrl = String(cp.videoUrl ?? out.videoUrl ?? "").trim();
     const mediaUrl =
-      channel === "reels" ? videoUrl : channel === "photo" ? photoUrl : photoUrl || videoUrl;
+      channel === "reels"
+        ? videoUrl
+        : channel === "photo"
+        ? photoUrl
+        : photoUrl || videoUrl;
 
     const rawBody = String(
-      cp.caption ?? out.contentMarkdown ?? out.summary ?? task.title ?? ""
+      cp.caption ?? out.contentMarkdown ?? out.summary ?? ""
     ).trim();
-    const cleanBody = cleanReadableText(rawBody, task.title);
+    const cleanBody = cleanReadableText(rawBody, "");
+    if (!cleanBody) continue;
 
-    // Jika satu item memuat paket Sore & Malam sekaligus, pisahkan agar siap tayang per slot
-    const hasSore = /slot sore/i.test(cleanBody);
-    const hasMalam = /slot malam/i.test(cleanBody);
-    if (hasSore && hasMalam) {
-      const malamSplit = cleanBody.split(/(?=slot malam)/i);
-      const sorePart = cleanReadableText(malamSplit[0] ?? "", `${task.title} — Sore`);
-      const malamPart = cleanReadableText(
-        malamSplit.slice(1).join("\n\n"),
-        `${task.title} — Malam`
+    const slotSections = splitSectionsBySlot(cleanBody);
+    const slotEntries = Object.entries(slotSections) as [
+      "pagi" | "siang" | "sore" | "malam",
+      string
+    ][];
+
+    if (slotEntries.length > 0) {
+      for (const [slotKey, sectionText] of slotEntries) {
+        const cleanedSection = cleanReadableText(sectionText, "");
+        if (!cleanedSection) continue;
+
+        const grp = ensureGroup(
+          task.workflow_run_id ?? null,
+          slotKey,
+          task,
+          channel,
+          mediaUrl,
+          cp,
+          stepOrder
+        );
+
+        if (role === "text") {
+          grp.textParts.push(cleanedSection);
+          if (!cp.readyToPublish) grp.primaryTask = task;
+        } else if (role === "marketing") {
+          grp.marketingParts.push(cleanedSection);
+        } else if (role === "quality") {
+          grp.qualityParts.push(cleanedSection);
+        } else {
+          grp.otherParts.push(cleanedSection);
+        }
+      }
+    } else {
+      const lowerHint = `${task.title ?? ""} ${cleanBody.slice(0, 120)}`.toLowerCase();
+      const inferredSlot: "pagi" | "siang" | "sore" | "malam" | "umum" =
+        lowerHint.includes("malam")
+          ? "malam"
+          : lowerHint.includes("sore")
+          ? "sore"
+          : lowerHint.includes("siang")
+          ? "siang"
+          : lowerHint.includes("pagi")
+          ? "pagi"
+          : "umum";
+
+      const grp = ensureGroup(
+        task.workflow_run_id ?? null,
+        inferredSlot,
+        task,
+        channel,
+        mediaUrl,
+        cp,
+        stepOrder
       );
 
-      items.push({
-        id: `${task.id}-sore`,
-        taskId: task.id,
-        projectId: task.project_id ?? null,
-        workflowRunId: task.workflow_run_id ?? null,
-        stepOrder,
-        channel: channel === "photo" ? "photo" : "text",
-        slotTimeLabel: channel === "photo" ? "11.00 WIB" : "15.00 WIB",
-        title: `${task.title} • Sore`,
-        contentText: sorePart,
-        mediaUrl,
-        isReadyToPublish: Boolean(cp.readyToPublish || cp.scheduledForCron),
-        checkpointState: cp,
-      });
-
-      items.push({
-        id: `${task.id}-malam`,
-        taskId: task.id,
-        projectId: task.project_id ?? null,
-        workflowRunId: task.workflow_run_id ?? null,
-        stepOrder,
-        channel: channel === "photo" ? "reels" : channel,
-        slotTimeLabel: "19.00 WIB",
-        title: `${task.title} • Malam`,
-        contentText: malamPart,
-        mediaUrl,
-        isReadyToPublish: Boolean(cp.readyToPublish || cp.scheduledForCron),
-        checkpointState: cp,
-      });
-      continue;
+      if (role === "text") {
+        grp.textParts.push(cleanBody);
+        if (!cp.readyToPublish) grp.primaryTask = task;
+      } else if (role === "marketing") {
+        grp.marketingParts.push(cleanBody);
+      } else if (role === "quality") {
+        grp.qualityParts.push(cleanBody);
+      } else {
+        grp.otherParts.push(cleanBody);
+      }
     }
-
-    items.push({
-      id: task.id,
-      taskId: task.id,
-      projectId: task.project_id ?? null,
-      workflowRunId: task.workflow_run_id ?? null,
-      stepOrder,
-      channel,
-      slotTimeLabel: getSlotTimeForChannel(channel),
-      title: task.title,
-      contentText: cleanBody,
-      mediaUrl,
-      isReadyToPublish: Boolean(cp.readyToPublish || cp.scheduledForCron),
-      checkpointState: cp,
-    });
   }
 
-  return items;
+  const slotRank: Record<string, number> = {
+    pagi: 1,
+    siang: 2,
+    sore: 3,
+    malam: 4,
+    umum: 5,
+  };
+
+  return Array.from(groups.values())
+    .filter(
+      (g) =>
+        g.textParts.length > 0 ||
+        g.marketingParts.length > 0 ||
+        g.otherParts.length > 0
+    )
+    .sort((a, b) => (slotRank[a.slotKey] ?? 9) - (slotRank[b.slotKey] ?? 9))
+    .map((g) => {
+      const mergedBody = [
+        ...g.textParts,
+        ...g.marketingParts,
+        ...g.otherParts,
+        ...(g.qualityParts.length > 0
+          ? [`Catatan Audit Kualitas:\n${g.qualityParts.join("\n")}`]
+          : []),
+      ].join("\n\n");
+
+      const slotSuffix =
+        g.slotKey === "sore"
+          ? " • Sore"
+          : g.slotKey === "malam"
+          ? " • Malam"
+          : g.slotKey === "pagi"
+          ? " • Pagi"
+          : g.slotKey === "siang"
+          ? " • Siang"
+          : "";
+
+      const primary = g.primaryTask!;
+      const headline = extractCleanTitleFromContent(
+        mergedBody,
+        `Konten Siap Tayang${slotSuffix}`
+      );
+
+      return {
+        id: g.groupKey,
+        taskId: primary.id,
+        sourceTaskIds: g.sourceTaskIds,
+        projectId: primary.project_id ?? null,
+        workflowRunId: g.runId,
+        stepOrder: g.stepOrder,
+        channel: g.channel,
+        slotTimeLabel: getSlotScheduleLabel(g.slotKey, g.channel),
+        title: `${headline}${slotSuffix}`,
+        contentText: mergedBody,
+        mediaUrl: g.mediaUrl,
+        isReadyToPublish: g.isReadyToPublish,
+        checkpointState: g.checkpointState,
+      };
+    });
 }
 
 export function ContentStudioWorkspace() {
@@ -462,7 +731,7 @@ export function ContentStudioWorkspace() {
       );
       setSavedIds((prev) => ({ ...prev, [item.id]: true }));
       setInfoMsg(
-        `Konten "${item.title}" ditandai Siap Publish untuk tab ${finalChannel.toUpperCase()} (${getSlotTimeForChannel(finalChannel)}).`
+        `Konten "${item.title}" ditandai Siap Publish untuk tab ${finalChannel.toUpperCase()} (${item.slotTimeLabel}).`
       );
     } catch (err) {
       setErrorMsg(
@@ -658,7 +927,8 @@ export function ContentStudioWorkspace() {
                           {isReady ? "Siap Publish" : "Draf Siap Rilis"}
                         </Badge>
                         <span className="text-[11px] text-slate-400">
-                          Jadwal: {getSlotTimeForChannel(currentChannel)}
+                          Jadwal: {item.slotTimeLabel} ·{" "}
+                          {item.sourceTaskIds.length} agen digabungkan
                         </span>
                       </div>
                     </div>
@@ -718,7 +988,7 @@ export function ContentStudioWorkspace() {
                   </div>
 
                   <textarea
-                    rows={5}
+                    rows={6}
                     value={currentText}
                     onChange={(e) =>
                       setDraftTexts((prev) => ({
